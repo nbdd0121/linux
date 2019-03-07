@@ -91,10 +91,13 @@ relocate:
 	add a0, a0, a1
 	csrw stvec, a0
 
-	/* Compute satp for kernel page tables, but don't load it yet */
+	/*
+	 * Compute satp for kernel page tables, but don't load it yet.
+	 * We also set all possible bits in ASID for ASIDLEN detection.
+	 */
 	la a2, swapper_pg_dir
 	srl a2, a2, PAGE_SHIFT
-	li a1, SATP_MODE
+	li a1, (SATP_MODE | SATP_ASID)
 	or a2, a2, a1
 
 	/*

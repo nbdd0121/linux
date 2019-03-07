@@ -42,14 +42,16 @@ early_param("tlbi_max_ops", setup_tlbi_max_ops);
 void local_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 			   unsigned long end)
 {
+	unsigned long asid;
 	if (end - start > tlbi_range_threshold) {
 		local_flush_tlb_mm(vma->vm_mm);
 		return;
 	}
 
+	asid = ASID(vma->vm_mm);
 	while (start < end) {
 		__asm__ __volatile__ ("sfence.vma %0, %1"
-				      : : "r" (start), "r" (0)
+				      : : "r" (start), "r" (asid)
 				      : "memory");
 		start += PAGE_SIZE;
 	}
@@ -182,24 +184,30 @@ void flush_tlb_all(void)
 
 void flush_tlb_mm(struct mm_struct *mm)
 {
-	remote_sfence_vma_asid(mm_cpumask(mm), 0, SFENCE_VMA_FLUSH_ALL, 0);
+	unsigned long asid = ASID(mm);
+	remote_sfence_vma_asid(mm_cpumask(mm), 0, SFENCE_VMA_FLUSH_ALL, asid);
 }
 
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
 {
-	remote_sfence_vma_asid(mm_cpumask(vma->vm_mm), addr, PAGE_SIZE, 0);
+	unsigned long asid = ASID(vma->vm_mm);
+	remote_sfence_vma_asid(&vma->vm_mm->context.cache_mask, addr,
+			       PAGE_SIZE, asid);
 }
 
 
 void flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 		     unsigned long end)
 {
+	unsigned long asid;
 	if (end - start > tlbi_range_threshold) {
 		flush_tlb_mm(vma->vm_mm);
 		return;
 	}
 
-	remote_sfence_vma_asid(mm_cpumask(vma->vm_mm), start, end - start, 0);
+	asid = ASID(vma->vm_mm);
+	remote_sfence_vma_asid(&vma->vm_mm->context.cache_mask, start,
+			       end - start, asid);
 }
 
 void flush_tlb_kernel_range(unsigned long start, unsigned long end)
