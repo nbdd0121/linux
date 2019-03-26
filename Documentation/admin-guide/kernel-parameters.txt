@@ -4544,6 +4544,14 @@
 			Force threading of all interrupt handlers except those
 			marked explicitly IRQF_NO_THREAD.
 
+	tlbi_max_ops=	[RV]
+			Format: <int> (must be >= 1 and < PTRS_PER_PTE)
+			Default: 1
+			Controls the maximum amount of page-level sfence.vma
+			that the kernel can issue when a range needs to be
+			flushed.
+			See arch/riscv/mm/tlbflush.c
+
 	tmem		[KNL,XEN]
 			Enable the Transcendent memory driver if built-in.
 

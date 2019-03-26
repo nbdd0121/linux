@@ -139,6 +139,7 @@ parameter is applicable::
 	PS2	Appropriate PS/2 support is enabled.
 	RAM	RAM disk support is enabled.
 	RDT	Intel Resource Director Technology.
+	RV	RISC-V architecture is enabled.
 	S390	S390 architecture is enabled.
 	SCSI	Appropriate SCSI support is enabled.
 			A lot of drivers have their options described inside
