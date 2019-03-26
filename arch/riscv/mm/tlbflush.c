@@ -72,19 +72,106 @@ void local_flush_tlb_kernel_range(unsigned long start, unsigned long end)
 
 #ifdef CONFIG_SMP
 
+/*
+ * SBI has interfaces for remote TLB shootdown.  If there is no hardware
+ * remote TLB shootdown support, SBI perform IPIs itself instead.  Some SBI
+ * implementations may also ignore ASID and address ranges provided and do a
+ * full TLB flush instead.  In these cases we might want to do IPIs ourselves.
+ *
+ * This parameter allows the approach (IPI/SBI) to be specified using boot
+ * cmdline.
+ */
+static bool tlbi_ipi = true;
+
+static int __init setup_tlbi_method(char *str)
+{
+	if (strcmp(str, "ipi") == 0)
+		tlbi_ipi = true;
+	else if (strcmp(str, "sbi") == 0)
+		tlbi_ipi = false;
+	else
+		return -EINVAL;
+
+	return 0;
+}
+early_param("tlbi_method", setup_tlbi_method);
+
+
+struct tlbi {
+	unsigned long start;
+	unsigned long size;
+	unsigned long asid;
+};
+
+static void ipi_remote_sfence_vma(void *info)
+{
+	struct tlbi *data = info;
+	unsigned long start = data->start;
+	unsigned long size = data->size;
+	unsigned long i;
+
+	if (size == SFENCE_VMA_FLUSH_ALL) {
+		local_flush_tlb_all();
+	}
+
+	for (i = 0; i < size; i += PAGE_SIZE) {
+		__asm__ __volatile__ ("sfence.vma %0"
+				      : : "r" (start + i)
+				      : "memory");
+	}
+}
+
+static void ipi_remote_sfence_vma_asid(void *info)
+{
+	struct tlbi *data = info;
+	unsigned long asid = data->asid;
+	unsigned long start = data->start;
+	unsigned long size = data->size;
+	unsigned long i;
+
+	if (size == SFENCE_VMA_FLUSH_ALL) {
+		__asm__ __volatile__ ("sfence.vma x0, %0"
+				      : : "r" (asid)
+				      : "memory");
+		return;
+	}
+
+	for (i = 0; i < size; i += PAGE_SIZE) {
+		__asm__ __volatile__ ("sfence.vma %0, %1"
+				      : : "r" (start + i), "r" (asid)
+				      : "memory");
+	}
+}
+
 static void remote_sfence_vma(unsigned long start, unsigned long size)
 {
-	sbi_remote_sfence_vma(NULL, start, size);
+	if (tlbi_ipi) {
+		struct tlbi info = {
+			.start = start,
+			.size = size,
+		};
+		on_each_cpu(ipi_remote_sfence_vma, &info, 1);
+	} else
+		sbi_remote_sfence_vma(NULL, start, size);
 }
 
 static void remote_sfence_vma_asid(cpumask_t *mask, unsigned long start,
 				   unsigned long size, unsigned long asid)
 {
-	cpumask_t hmask;
+	if (tlbi_ipi) {
+		struct tlbi info = {
+			.start = start,
+			.size = size,
+			.asid = asid,
+		};
+		on_each_cpu_mask(mask, ipi_remote_sfence_vma_asid, &info, 1);
+	} else {
+		cpumask_t hmask;
 
-	cpumask_clear(&hmask);
-	riscv_cpuid_to_hartid_mask(mask, &hmask);
-	sbi_remote_sfence_vma_asid(hmask.bits, start, size, asid);
+		cpumask_clear(&hmask);
+		riscv_cpuid_to_hartid_mask(mask, &hmask);
+		sbi_remote_sfence_vma_asid(hmask.bits, start, size, asid);
+	}
 }
 
 
