@@ -64,7 +64,13 @@ void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 	 * privileged ISA 1.10 yet.
 	 */
 	csr_write(sptbr, virt_to_pfn(next->pgd) | SATP_MODE);
-	local_flush_tlb_all();
+
+	/*
+	 * sfence.vma after SATP write. We call it on MM context instead of
+	 * calling local_flush_tlb_all to prevent global mappings from being
+	 * affected.
+	 */
+	local_flush_tlb_mm(next);
 
 	flush_icache_deferred(next);
 }
