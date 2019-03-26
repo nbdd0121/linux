@@ -4552,6 +4552,11 @@
 			flushed.
 			See arch/riscv/mm/tlbflush.c
 
+	tlbi_method=	[RV]
+			Format: { "sbi", "ipi" }
+			Default: "ipi"
+			Specify the method used to perform remote TLB shootdown.
+
 	tmem		[KNL,XEN]
 			Enable the Transcendent memory driver if built-in.
 
