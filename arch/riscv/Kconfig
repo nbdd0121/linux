@@ -283,6 +283,22 @@ config RISCV_ISA_C
 
 	   If you don't know what to do here, say Y.
 
+config RISCV_TLBI_EAGER
+	bool "Eagerly sfence.vma when writing invalid entries"
+	default y
+	help
+	  In RISC-V, sfence.vma specifies an ordering constraint, making it
+	  necessary even after writing invalid entries.  This config specifies
+	  whether the Linux kernel should eagerly execute sfence.vma when writing
+	  invalid entries.
+
+	  If the hardware is known to not cache invalid entries, turning this
+	  option off can avoid excessive sfence.vma.  Turning this option off for
+	  hardware that caches invalid entries will reduce performance, but is
+	  still correct with the help of flush_tlb_fix_spurious_fault.
+
+	  If you don't know what to do here, say Y.
+
 menu "supported PMU type"
 	depends on PERF_EVENTS
 

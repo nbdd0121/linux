@@ -321,14 +321,17 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 static inline void update_mmu_cache(struct vm_area_struct *vma,
 	unsigned long address, pte_t *ptep)
 {
+#ifdef CONFIG_RISCV_TLBI_EAGER
 	/*
-	 * The kernel assumes that TLBs don't cache invalid entries, but
-	 * in RISC-V, SFENCE.VMA specifies an ordering constraint, not a
+	 * In RISC-V, SFENCE.VMA specifies an ordering constraint, not a
 	 * cache flush; it is necessary even after writing invalid entries.
-	 * Relying on flush_tlb_fix_spurious_fault would suffice, but
-	 * the extra traps reduce performance.  So, eagerly SFENCE.VMA.
+	 *
+	 * For a hardware that may cache invalid entries, relying on
+	 * flush_tlb_fix_spurious_fault would suffice, but the extra traps reduce
+	 * performance.  So, eagerly SFENCE.VMA.
 	 */
 	local_flush_tlb_page(vma, address);
+#endif
 }
 
 #define __HAVE_ARCH_PTE_SAME
@@ -372,9 +375,21 @@ static inline int ptep_set_access_flags(struct vm_area_struct *vma,
 	if (!pte_same(*ptep, entry))
 		set_pte_at(vma->vm_mm, address, ptep, entry);
 	/*
-	 * update_mmu_cache will unconditionally execute, handling both
-	 * the case that the PTE changed and the spurious fault case.
+	 * The kernel assumes that TLBs don't cache invalid entries, but
+	 * in RISC-V, SFENCE.VMA specifies an ordering constraint, not a
+	 * cache flush; it is necessary even after writing invalid entries.
+	 * Therefore we cannot return false even if nothing is changed, as the
+	 * kernel will only call flush_tlb_fix_spurious_fault if the fault is
+	 * caused by a write.
+	 *
+	 * If CONFIG_RISCV_TLBI_EAGER is on, then update_mmu_cache will always
+	 * perform a SFENCE.VMA, so we don't want to issue duplicate SFENCE.VMAs.
+	 * Otherwise, we need to flush TLB here for correctness.
 	 */
+#ifndef CONFIG_RISCV_TLBI_EAGER
+	else
+		local_flush_tlb_page(vma, address);
+#endif
 	return true;
 }
 
