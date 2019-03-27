@@ -12,6 +12,8 @@
 
 #include <linux/mm.h>
 #include <linux/sched.h>
+#include <asm/tlbflush.h>
+#include <asm/cacheflush.h>
 
 static inline void enter_lazy_tlb(struct mm_struct *mm,
 	struct task_struct *task)
@@ -22,6 +24,8 @@ static inline void enter_lazy_tlb(struct mm_struct *mm,
 static inline int init_new_context(struct task_struct *task,
 	struct mm_struct *mm)
 {
+	atomic_long_set(&mm->context.asid, 0);
+	cpumask_empty(&mm->context.cache_mask);
 	return 0;
 }
 
@@ -35,12 +39,14 @@ void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 static inline void activate_mm(struct mm_struct *prev,
 			       struct mm_struct *next)
 {
-	switch_mm(prev, next, NULL);
+	switch_mm(prev, next, current);
 }
 
 static inline void deactivate_mm(struct task_struct *task,
 	struct mm_struct *mm)
 {
 }
+
+void verify_cpu_asidlen(void);
 
 #endif /* _ASM_RISCV_MMU_CONTEXT_H */

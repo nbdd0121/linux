@@ -150,6 +150,8 @@ asmlinkage __visible void smp_callin(void)
 	if (!IS_ENABLED(CONFIG_RISCV_SBI))
 		clint_clear_ipi(cpuid_to_hartid_map(smp_processor_id()));
 
+	verify_cpu_asidlen();
+
 	/* All kernel threads share the same mm context.  */
 	mmgrab(mm);
 	current->active_mm = mm;

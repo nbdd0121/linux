@@ -16,6 +16,7 @@ static void __sbi_tlb_flush_range(struct mm_struct *mm, unsigned long start,
     struct cpumask *cmask = mm_cpumask(mm);
 	struct cpumask hmask;
 	unsigned int cpuid;
+	unsigned long asid = ASID(mm);
 
 	if (cpumask_empty(cmask))
 		return;
@@ -23,7 +24,7 @@ static void __sbi_tlb_flush_range(struct mm_struct *mm, unsigned long start,
 	cpuid = get_cpu();
 
 	riscv_cpuid_to_hartid_mask(cmask, &hmask);
-	sbi_remote_sfence_vma_asid(cpumask_bits(&hmask), start, size, 0);
+	sbi_remote_sfence_vma_asid(cpumask_bits(&hmask), start, size, asid);
 
 	put_cpu();
 }

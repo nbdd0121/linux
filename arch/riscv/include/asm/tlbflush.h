@@ -16,19 +16,31 @@ static inline void local_flush_tlb_all(void)
 	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 }
 
+/*
+ * Flush one MM context.
+ *
+ * - If ASID is not enabled, then this flushes ASID 0, which is correct as we
+ *   don't need ordering to global mappings.
+ *
+ * - If ASID is not assigned or is stale, then we don't need flush at all, so
+ *   we can safely flush any ASID.
+ *
+ * - Otherwise we are flushing the correct ASID.
+ */
 static inline void local_flush_tlb_mm(struct mm_struct *mm)
 {
-	/* Flush ASID 0 so that global mappings are not affected */
-	__asm__ __volatile__ ("sfence.vma x0, %0" : : "r" (0) : "memory");
+	unsigned long asid = ASID(mm);
+	__asm__ __volatile__ ("sfence.vma x0, %0" : : "r" (asid) : "memory");
 }
 
 /* Flush one page from local TLB */
 static inline void local_flush_tlb_page(struct vm_area_struct *vma,
                                         unsigned long addr)
 {
-        __asm__ __volatile__ ("sfence.vma %0, %1"
-                              : : "r" (addr), "r" (0)
-                              : "memory");
+	unsigned long asid = ASID(vma->vm_mm);
+	__asm__ __volatile__ ("sfence.vma %0, %1"
+			      : : "r" (addr), "r" (asid)
+			      : "memory");
 }
 
 static inline void local_flush_tlb_kernel_page(unsigned long addr)

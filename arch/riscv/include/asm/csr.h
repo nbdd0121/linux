@@ -39,12 +39,16 @@
 /* SATP flags */
 #ifndef CONFIG_64BIT
 #define SATP_PPN	_AC(0x003FFFFF, UL)
+#define SATP_ASID    _AC(0x7FC00000, UL)
 #define SATP_MODE_32	_AC(0x80000000, UL)
 #define SATP_MODE	SATP_MODE_32
+#define SATP_ASID_SHIFT 22
 #else
 #define SATP_PPN	_AC(0x00000FFFFFFFFFFF, UL)
+#define SATP_ASID    _AC(0x0FFFF00000000000, UL)
 #define SATP_MODE_39	_AC(0x8000000000000000, UL)
 #define SATP_MODE	SATP_MODE_39
+#define SATP_ASID_SHIFT 44
 #endif
 
 /* Exception cause high bit - is an interrupt if set */
