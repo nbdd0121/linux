@@ -275,7 +275,7 @@ vmalloc_fault:
 		 * ordering constraint, not a cache flush; it is
 		 * necessary even after writing invalid entries.
 		 */
-		local_flush_tlb_page(addr);
+		local_flush_tlb_kernel_page(addr);
 
 		return;
 	}

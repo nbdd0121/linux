@@ -16,8 +16,22 @@ static inline void local_flush_tlb_all(void)
 	__asm__ __volatile__ ("sfence.vma" : : : "memory");
 }
 
+static inline void local_flush_tlb_mm(struct mm_struct *mm)
+{
+	/* Flush ASID 0 so that global mappings are not affected */
+	__asm__ __volatile__ ("sfence.vma x0, %0" : : "r" (0) : "memory");
+}
+
 /* Flush one page from local TLB */
-static inline void local_flush_tlb_page(unsigned long addr)
+static inline void local_flush_tlb_page(struct vm_area_struct *vma,
+                                        unsigned long addr)
+{
+        __asm__ __volatile__ ("sfence.vma %0, %1"
+                              : : "r" (addr), "r" (0)
+                              : "memory");
+}
+
+static inline void local_flush_tlb_kernel_page(unsigned long addr)
 {
 	__asm__ __volatile__ ("sfence.vma %0" : : "r" (addr) : "memory");
 }
@@ -32,25 +46,36 @@ void flush_tlb_mm(struct mm_struct *mm);
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr);
 void flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 		     unsigned long end);
+void flush_tlb_kernel_range(unsigned long start, unsigned long end);
 #else /* CONFIG_SMP && CONFIG_MMU */
 
 #define flush_tlb_all() local_flush_tlb_all()
-#define flush_tlb_page(vma, addr) local_flush_tlb_page(addr)
+#define flush_tlb_mm(mm) local_flush_tlb_mm(mm)
+#define flush_tlb_page(vma, addr) local_flush_tlb_page(vma, addr)
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
 		unsigned long start, unsigned long end)
 {
-	local_flush_tlb_all();
-}
+	if (end - start > PAGE_SIZE) {
+		local_flush_tlb_mm(vma->vm_mm);
+		return;
+	}
 
-#define flush_tlb_mm(mm) flush_tlb_all()
-#endif /* !CONFIG_SMP || !CONFIG_MMU */
+	flush_tlb_page(vma, start);
+}
 
 /* Flush a range of kernel pages */
 static inline void flush_tlb_kernel_range(unsigned long start,
 	unsigned long end)
 {
-	flush_tlb_all();
+	if (end - start > PAGE_SIZE) {
+		local_flush_tlb_all();
+		return;
+	}
+
+	flush_tlb_kernel_page(start);
 }
+
+#endif /* !CONFIG_SMP || !CONFIG_MMU */
 
 #endif /* _ASM_RISCV_TLBFLUSH_H */
