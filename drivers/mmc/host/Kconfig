@@ -239,6 +239,16 @@ config MMC_SDHCI_OF_SPARX5
 
 	  If unsure, say N.
 
+config MMC_SDHCI_OF_GARYGUO
+	tristate "SDHCI OF support for Gary Guo's open source SDHCI controllers"
+	depends on MMC_SDHCI_PLTFM
+	depends on OF
+	depends on COMMON_CLK
+	help
+	  This selects Gary Guo's open source SDHCI controller support.
+	  If you have a controller with this interface, say Y or M here.
+	  If unsure, say N.
+
 config MMC_SDHCI_CADENCE
 	tristate "SDHCI support for the Cadence SD/SDIO/eMMC controller"
 	depends on MMC_SDHCI_PLTFM
