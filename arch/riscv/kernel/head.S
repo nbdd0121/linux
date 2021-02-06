@@ -228,12 +228,18 @@ ENTRY(_start_kernel)
 .align 2
 pmp_done:
 
+	/* Allow user-mode to access time CSR */
+	csrw CSR_MCOUNTEREN, 2
+
 	/*
 	 * The hartid in a0 is expected later on, and we have no firmware
 	 * to hand it to us.
 	 */
 	csrr a0, CSR_MHARTID
 #endif /* CONFIG_RISCV_M_MODE */
+
+	/* Allow user-mode to access time CSR */
+	csrw CSR_SCOUNTEREN, 2
 
 	/* Load the global pointer */
 .option push
