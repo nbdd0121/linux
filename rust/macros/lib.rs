@@ -2,6 +2,7 @@
 
 //! Crate for all kernel procedural macros.
 mod module;
+mod syn;
 
 use proc_macro::TokenStream;
 
