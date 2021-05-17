@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+pub mod buffer;
 mod lit;
 
 pub use lit::{Lit, LitByteStr, LitStr};
