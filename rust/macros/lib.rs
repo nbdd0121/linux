@@ -22,20 +22,20 @@ use proc_macro::TokenStream;
 ///
 /// module!{
 ///     type: MyKernelModule,
-///     name: b"my_kernel_module",
-///     author: b"Rust for Linux Contributors",
-///     description: b"My very own kernel module!",
-///     license: b"GPL v2",
+///     name: "my_kernel_module",
+///     author: "Rust for Linux Contributors",
+///     description: "My very own kernel module!",
+///     license: "GPL v2",
 ///     params: {
 ///        my_i32: i32 {
 ///            default: 42,
 ///            permissions: 0o000,
-///            description: b"Example of i32",
+///            description: "Example of i32",
 ///        },
 ///        writeable_i32: i32 {
 ///            default: 42,
 ///            permissions: 0o644,
-///            description: b"Example of i32",
+///            description: "Example of i32",
 ///        },
 ///    },
 /// }
@@ -108,10 +108,10 @@ pub fn module(ts: TokenStream) -> TokenStream {
 ///
 /// module_misc_device! {
 ///     type: MyFile,
-///     name: b"my_miscdev_kernel_module",
-///     author: b"Rust for Linux Contributors",
-///     description: b"My very own misc device kernel module!",
-///     license: b"GPL v2",
+///     name: "my_miscdev_kernel_module",
+///     author: "Rust for Linux Contributors",
+///     description: "My very own misc device kernel module!",
+///     license: "GPL v2",
 /// }
 ///
 /// #[derive(Default)]

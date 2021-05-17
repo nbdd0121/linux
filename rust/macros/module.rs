@@ -5,7 +5,8 @@
 #![deny(clippy::perf)]
 #![deny(clippy::style)]
 
-use proc_macro::{token_stream, Delimiter, Group, TokenStream, TokenTree};
+use crate::syn::Lit;
+use proc_macro::{token_stream, Delimiter, Group, Literal, TokenStream, TokenTree};
 
 fn try_ident(it: &mut token_stream::IntoIter) -> Option<String> {
     if let Some(TokenTree::Ident(ident)) = it.next() {
@@ -15,21 +16,21 @@ fn try_ident(it: &mut token_stream::IntoIter) -> Option<String> {
     }
 }
 
-fn try_literal(it: &mut token_stream::IntoIter) -> Option<String> {
+fn try_literal(it: &mut token_stream::IntoIter) -> Option<Literal> {
     if let Some(TokenTree::Literal(literal)) = it.next() {
-        Some(literal.to_string())
+        Some(literal)
     } else {
         None
     }
 }
 
-fn try_byte_string(it: &mut token_stream::IntoIter) -> Option<String> {
-    try_literal(it).and_then(|byte_string| {
-        if byte_string.starts_with("b\"") && byte_string.ends_with('\"') {
-            Some(byte_string[2..byte_string.len() - 1].to_string())
-        } else {
-            None
+fn try_string(it: &mut token_stream::IntoIter) -> Option<String> {
+    try_literal(it).and_then(|literal| match Lit::new(literal) {
+        Lit::Str(s) => {
+            assert!(s.suffix().is_empty(), "Unexpected suffix");
+            Some(s.value())
         }
+        _ => None,
     })
 }
 
@@ -45,7 +46,7 @@ fn expect_punct(it: &mut token_stream::IntoIter) -> char {
     }
 }
 
-fn expect_literal(it: &mut token_stream::IntoIter) -> String {
+fn expect_literal(it: &mut token_stream::IntoIter) -> Literal {
     try_literal(it).expect("Expected Literal")
 }
 
@@ -57,8 +58,8 @@ fn expect_group(it: &mut token_stream::IntoIter) -> Group {
     }
 }
 
-fn expect_byte_string(it: &mut token_stream::IntoIter) -> String {
-    try_byte_string(it).expect("Expected byte string")
+fn expect_string(it: &mut token_stream::IntoIter) -> String {
+    try_string(it).expect("Expected string")
 }
 
 #[derive(Clone, PartialEq)]
@@ -71,7 +72,7 @@ fn expect_array_fields(it: &mut token_stream::IntoIter) -> ParamType {
     assert_eq!(expect_punct(it), '<');
     let vals = expect_ident(it);
     assert_eq!(expect_punct(it), ',');
-    let max_length_str = expect_literal(it);
+    let max_length_str = expect_literal(it).to_string();
     let max_length = max_length_str
         .parse::<usize>()
         .expect("Expected usize length");
@@ -102,15 +103,15 @@ fn expect_end(it: &mut token_stream::IntoIter) {
 fn get_literal(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
     assert_eq!(expect_ident(it), expected_name);
     assert_eq!(expect_punct(it), ':');
-    let literal = expect_literal(it);
+    let literal = expect_literal(it).to_string();
     assert_eq!(expect_punct(it), ',');
     literal
 }
 
-fn get_byte_string(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
+fn get_string(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
     assert_eq!(expect_ident(it), expected_name);
     assert_eq!(expect_punct(it), ':');
-    let byte_string = expect_byte_string(it);
+    let byte_string = expect_string(it);
     assert_eq!(expect_punct(it), ',');
     byte_string
 }
@@ -125,14 +126,14 @@ fn __build_modinfo_string_base(
     let string = if builtin {
         // Built-in modules prefix their modinfo strings by `module.`.
         format!(
-            "{module}.{field}={content}",
+            "{module}.{field}={content}\0",
             module = module,
             field = field,
             content = content
         )
     } else {
         // Loadable modules' modinfo strings go as-is.
-        format!("{field}={content}", field = field, content = content)
+        format!("{field}={content}\0", field = field, content = content)
     };
 
     format!(
@@ -140,7 +141,7 @@ fn __build_modinfo_string_base(
             {cfg}
             #[link_section = \".modinfo\"]
             #[used]
-            pub static {variable}: [u8; {length}] = *b\"{string}\\0\";
+            pub static {variable}: [u8; {length}] = *{string};
         ",
         cfg = if builtin {
             "#[cfg(not(MODULE))]"
@@ -148,8 +149,8 @@ fn __build_modinfo_string_base(
             "#[cfg(MODULE)]"
         },
         variable = variable,
-        length = string.len() + 1,
-        string = string,
+        length = string.len(),
+        string = Literal::byte_string(string.as_bytes()),
     )
 }
 
@@ -242,10 +243,14 @@ fn try_simple_param_val(
     match param_type {
         "bool" => Box::new(|param_it| try_ident(param_it)),
         "str" => Box::new(|param_it| {
-            try_byte_string(param_it)
-                .map(|s| format!("kernel::module_param::StringParam::Ref(b\"{}\")", s))
+            try_string(param_it).map(|s| {
+                format!(
+                    "kernel::module_param::StringParam::Ref({})",
+                    Literal::byte_string(s.as_bytes())
+                )
+            })
         }),
-        _ => Box::new(|param_it| try_literal(param_it)),
+        _ => Box::new(|param_it| try_literal(param_it).map(|x| x.to_string())),
     }
 }
 
@@ -349,14 +354,12 @@ impl ModuleInfo {
 
             match key.as_str() {
                 "type" => info.type_ = expect_ident(it),
-                "name" => info.name = expect_byte_string(it),
-                "author" => info.author = Some(expect_byte_string(it)),
-                "description" => info.description = Some(expect_byte_string(it)),
-                "license" => info.license = expect_byte_string(it),
-                "alias" => info.alias = Some(expect_byte_string(it)),
-                "alias_rtnl_link" => {
-                    info.alias = Some(format!("rtnl-link-{}", expect_byte_string(it)))
-                }
+                "name" => info.name = expect_string(it),
+                "author" => info.author = Some(expect_string(it)),
+                "description" => info.description = Some(expect_string(it)),
+                "license" => info.license = expect_string(it),
+                "alias" => info.alias = Some(expect_string(it)),
+                "alias_rtnl_link" => info.alias = Some(format!("rtnl-link-{}", expect_string(it))),
                 "params" => info.params = Some(expect_group(it)),
                 _ => panic!(
                     "Unknown key \"{}\". Valid keys are: {:?}.",
@@ -426,7 +429,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
             let mut param_it = group.stream().into_iter();
             let param_default = get_default(&param_type, &mut param_it);
             let param_permissions = get_literal(&mut param_it, "permissions");
-            let param_description = get_byte_string(&mut param_it, "description");
+            let param_description = get_string(&mut param_it, "description");
             expect_end(&mut param_it);
 
             // TODO: more primitive types
@@ -719,29 +722,29 @@ pub fn module_misc_device(ts: TokenStream) -> TokenStream {
 
             kernel::prelude::module! {{
                 type: {module},
-                name: b\"{name}\",
+                name: {name},
                 {author}
                 {description}
-                license: b\"{license}\",
+                license: {license},
                 {alias}
             }}
         ",
         module = module,
         type_ = info.type_,
-        name = info.name,
+        name = Literal::string(&info.name),
         author = info
             .author
-            .map(|v| format!("author: b\"{}\",", v))
+            .map(|v| format!("author: {},", Literal::string(&v)))
             .unwrap_or_else(|| "".to_string()),
         description = info
             .description
-            .map(|v| format!("description: b\"{}\",", v))
+            .map(|v| format!("description: {},", Literal::string(&v)))
             .unwrap_or_else(|| "".to_string()),
         alias = info
             .alias
-            .map(|v| format!("alias: b\"{}\",", v))
+            .map(|v| format!("alias: {},", Literal::string(&v)))
             .unwrap_or_else(|| "".to_string()),
-        license = info.license
+        license = Literal::string(&info.license)
     )
     .parse()
     .expect("Error parsing formatted string into token stream.")
