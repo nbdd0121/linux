@@ -5,61 +5,46 @@
 #![deny(clippy::perf)]
 #![deny(clippy::style)]
 
-use crate::syn::Lit;
-use proc_macro::{token_stream, Delimiter, Group, Literal, TokenStream, TokenTree};
+use crate::syn::{
+    buffer::{Cursor, TokenBuffer},
+    Lit,
+};
+use proc_macro::{Delimiter, Literal, TokenStream};
 
-fn try_ident(it: &mut token_stream::IntoIter) -> Option<String> {
-    if let Some(TokenTree::Ident(ident)) = it.next() {
-        Some(ident.to_string())
-    } else {
-        None
-    }
+fn expect_ident(it: &mut Cursor<'_>) -> String {
+    let (ident, next) = it.ident().expect("Expected Ident");
+    *it = next;
+    ident.to_string()
 }
 
-fn try_literal(it: &mut token_stream::IntoIter) -> Option<Literal> {
-    if let Some(TokenTree::Literal(literal)) = it.next() {
-        Some(literal)
-    } else {
-        None
-    }
+fn expect_punct(it: &mut Cursor<'_>) -> char {
+    let (punct, next) = it.punct().expect("Expected Punct");
+    *it = next;
+    punct.as_char()
 }
 
-fn try_string(it: &mut token_stream::IntoIter) -> Option<String> {
-    try_literal(it).and_then(|literal| match Lit::new(literal) {
+fn expect_literal(it: &mut Cursor<'_>) -> Literal {
+    let (lit, next) = it.literal().expect("Expected Literal");
+    *it = next;
+    lit
+}
+
+fn expect_group<'a>(it: &mut Cursor<'a>, delim: Delimiter) -> Cursor<'a> {
+    let (inner, _, next) = it.group(delim).expect("Expected Group");
+    *it = next;
+    inner
+}
+
+fn expect_string(it: &mut Cursor<'_>) -> String {
+    let lit = expect_literal(it);
+    let lit = Lit::new(lit);
+    match &lit {
         Lit::Str(s) => {
             assert!(s.suffix().is_empty(), "Unexpected suffix");
-            Some(s.value())
+            s.value()
         }
-        _ => None,
-    })
-}
-
-fn expect_ident(it: &mut token_stream::IntoIter) -> String {
-    try_ident(it).expect("Expected Ident")
-}
-
-fn expect_punct(it: &mut token_stream::IntoIter) -> char {
-    if let TokenTree::Punct(punct) = it.next().expect("Reached end of token stream for Punct") {
-        punct.as_char()
-    } else {
-        panic!("Expected Punct");
+        _ => panic!("Expected string"),
     }
-}
-
-fn expect_literal(it: &mut token_stream::IntoIter) -> Literal {
-    try_literal(it).expect("Expected Literal")
-}
-
-fn expect_group(it: &mut token_stream::IntoIter) -> Group {
-    if let TokenTree::Group(group) = it.next().expect("Reached end of token stream for Group") {
-        group
-    } else {
-        panic!("Expected Group");
-    }
-}
-
-fn expect_string(it: &mut token_stream::IntoIter) -> String {
-    try_string(it).expect("Expected string")
 }
 
 #[derive(Clone, PartialEq)]
@@ -68,7 +53,7 @@ enum ParamType {
     Array { vals: String, max_length: usize },
 }
 
-fn expect_array_fields(it: &mut token_stream::IntoIter) -> ParamType {
+fn expect_array_fields(it: &mut Cursor<'_>) -> ParamType {
     assert_eq!(expect_punct(it), '<');
     let vals = expect_ident(it);
     assert_eq!(expect_punct(it), ',');
@@ -80,27 +65,39 @@ fn expect_array_fields(it: &mut token_stream::IntoIter) -> ParamType {
     ParamType::Array { vals, max_length }
 }
 
-fn expect_type(it: &mut token_stream::IntoIter) -> ParamType {
-    if let TokenTree::Ident(ident) = it
-        .next()
-        .expect("Reached end of token stream for param type")
-    {
-        match ident.to_string().as_ref() {
-            "ArrayParam" => expect_array_fields(it),
-            _ => ParamType::Ident(ident.to_string()),
+fn expect_type(it: &mut Cursor<'_>) -> ParamType {
+    let (ident, next) = it.ident().expect("Expected Param Type");
+    *it = next;
+    match ident.to_string().as_ref() {
+        "ArrayParam" => expect_array_fields(it),
+        _ => ParamType::Ident(ident.to_string()),
+    }
+}
+
+fn expect_end(it: &mut Cursor<'_>) {
+    assert!(it.eof(), "Expected end");
+}
+
+fn parse_list<T>(
+    it: &mut Cursor<'_>,
+    delim: Delimiter,
+    f: impl Fn(&mut Cursor<'_>) -> T,
+) -> Vec<T> {
+    let mut inner = expect_group(it, delim);
+    let mut vec = Vec::new();
+    while !inner.eof() {
+        let item = f(&mut inner);
+        vec.push(item);
+        if inner.eof() {
+            break;
         }
-    } else {
-        panic!("Expected Param Type")
+        assert_eq!(expect_punct(&mut inner), ',');
     }
+    assert!(inner.eof(), "Expected end");
+    vec
 }
 
-fn expect_end(it: &mut token_stream::IntoIter) {
-    if it.next().is_some() {
-        panic!("Expected end");
-    }
-}
-
-fn get_literal(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
+fn get_literal(it: &mut Cursor<'_>, expected_name: &str) -> String {
     assert_eq!(expect_ident(it), expected_name);
     assert_eq!(expect_punct(it), ':');
     let literal = expect_literal(it).to_string();
@@ -108,7 +105,7 @@ fn get_literal(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
     literal
 }
 
-fn get_string(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
+fn get_string(it: &mut Cursor<'_>, expected_name: &str) -> String {
     assert_eq!(expect_ident(it), expected_name);
     assert_eq!(expect_punct(it), ':');
     let byte_string = expect_string(it);
@@ -237,53 +234,45 @@ fn param_ops_path(param_type: &str) -> &'static str {
     }
 }
 
-fn try_simple_param_val(
-    param_type: &str,
-) -> Box<dyn Fn(&mut token_stream::IntoIter) -> Option<String>> {
+fn expect_simple_param_val(param_type: &str) -> Box<dyn Fn(&mut Cursor<'_>) -> String> {
     match param_type {
-        "bool" => Box::new(|param_it| try_ident(param_it)),
-        "str" => Box::new(|param_it| {
-            try_string(param_it).map(|s| {
-                format!(
-                    "kernel::module_param::StringParam::Ref({})",
-                    Literal::byte_string(s.as_bytes())
-                )
-            })
+        "bool" => Box::new(|param_it| {
+            let (ident, next) = param_it.ident().expect("Expected ident");
+            *param_it = next;
+            ident.to_string()
         }),
-        _ => Box::new(|param_it| try_literal(param_it).map(|x| x.to_string())),
+        "str" => Box::new(|param_it| {
+            let s = expect_string(param_it);
+            format!(
+                "kernel::module_param::StringParam::Ref({})",
+                Literal::byte_string(s.as_bytes())
+            )
+        }),
+        _ => Box::new(|param_it| {
+            let (lit, next) = param_it.literal().expect("Expected literal");
+            *param_it = next;
+            lit.to_string()
+        }),
     }
 }
 
-fn get_default(param_type: &ParamType, param_it: &mut token_stream::IntoIter) -> String {
-    let try_param_val = match param_type {
+fn get_default(param_type: &ParamType, param_it: &mut Cursor<'_>) -> String {
+    let expect_param_val = match param_type {
         ParamType::Ident(ref param_type)
         | ParamType::Array {
             vals: ref param_type,
             max_length: _,
-        } => try_simple_param_val(param_type),
+        } => expect_simple_param_val(param_type),
     };
     assert_eq!(expect_ident(param_it), "default");
     assert_eq!(expect_punct(param_it), ':');
     let default = match param_type {
-        ParamType::Ident(_) => try_param_val(param_it).expect("Expected default param value"),
+        ParamType::Ident(_) => expect_param_val(param_it),
         ParamType::Array {
             vals: _,
             max_length: _,
         } => {
-            let group = expect_group(param_it);
-            assert_eq!(group.delimiter(), Delimiter::Bracket);
-            let mut default_vals = Vec::new();
-            let mut it = group.stream().into_iter();
-
-            while let Some(default_val) = try_param_val(&mut it) {
-                default_vals.push(default_val);
-                match it.next() {
-                    Some(TokenTree::Punct(punct)) => assert_eq!(punct.as_char(), ','),
-                    None => break,
-                    _ => panic!("Expected ',' or end of array default values"),
-                }
-            }
-
+            let default_vals = parse_list(param_it, Delimiter::Bracket, expect_param_val);
             let mut default_array = "kernel::module_param::ArrayParam::create(&[".to_string();
             default_array.push_str(
                 &default_vals
@@ -308,19 +297,19 @@ fn generated_array_ops_name(vals: &str, max_length: usize) -> String {
     )
 }
 
-#[derive(Debug, Default)]
-struct ModuleInfo {
+#[derive(Default)]
+struct ModuleInfo<'a> {
     type_: String,
     license: String,
     name: String,
     author: Option<String>,
     description: Option<String>,
     alias: Option<String>,
-    params: Option<Group>,
+    params: Option<Cursor<'a>>,
 }
 
-impl ModuleInfo {
-    fn parse(it: &mut token_stream::IntoIter) -> Self {
+impl<'a> ModuleInfo<'a> {
+    fn parse(it: &mut Cursor<'a>) -> Self {
         let mut info = ModuleInfo::default();
 
         const EXPECTED_KEYS: &[&str] = &[
@@ -337,11 +326,11 @@ impl ModuleInfo {
         let mut seen_keys = Vec::new();
 
         loop {
-            let key = match it.next() {
-                Some(TokenTree::Ident(ident)) => ident.to_string(),
-                Some(_) => panic!("Expected Ident or end"),
-                None => break,
-            };
+            if it.eof() {
+                break;
+            }
+
+            let key = expect_ident(it);
 
             if seen_keys.contains(&key) {
                 panic!(
@@ -360,7 +349,7 @@ impl ModuleInfo {
                 "license" => info.license = expect_string(it),
                 "alias" => info.alias = Some(expect_string(it)),
                 "alias_rtnl_link" => info.alias = Some(format!("rtnl-link-{}", expect_string(it))),
-                "params" => info.params = Some(expect_group(it)),
+                "params" => info.params = Some(expect_group(it, Delimiter::Brace)),
                 _ => panic!(
                     "Unknown key \"{}\". Valid keys are: {:?}.",
                     key, EXPECTED_KEYS
@@ -399,7 +388,8 @@ impl ModuleInfo {
 }
 
 pub fn module(ts: TokenStream) -> TokenStream {
-    let mut it = ts.into_iter();
+    let buffer = TokenBuffer::new(ts);
+    let mut it = buffer.begin();
 
     let info = ModuleInfo::parse(&mut it);
 
@@ -408,25 +398,20 @@ pub fn module(ts: TokenStream) -> TokenStream {
     let mut array_types_to_generate = Vec::new();
     let mut params_modinfo = String::new();
     if let Some(params) = info.params {
-        assert_eq!(params.delimiter(), Delimiter::Brace);
-
-        let mut it = params.stream().into_iter();
+        let mut it = params;
 
         loop {
-            let param_name = match it.next() {
-                Some(TokenTree::Ident(ident)) => ident.to_string(),
-                Some(_) => panic!("Expected Ident or end"),
-                None => break,
-            };
+            if it.eof() {
+                break;
+            }
+
+            let param_name = expect_ident(&mut it);
 
             assert_eq!(expect_punct(&mut it), ':');
             let param_type = expect_type(&mut it);
-            let group = expect_group(&mut it);
+            let mut param_it = expect_group(&mut it, Delimiter::Brace);
             assert_eq!(expect_punct(&mut it), ',');
 
-            assert_eq!(group.delimiter(), Delimiter::Brace);
-
-            let mut param_it = group.stream().into_iter();
             let param_default = get_default(&param_type, &mut param_it);
             let param_permissions = get_literal(&mut param_it, "permissions");
             let param_description = get_string(&mut param_it, "description");
@@ -695,7 +680,8 @@ pub fn module(ts: TokenStream) -> TokenStream {
 }
 
 pub fn module_misc_device(ts: TokenStream) -> TokenStream {
-    let mut it = ts.into_iter();
+    let buffer = TokenBuffer::new(ts);
+    let mut it = buffer.begin();
 
     let info = ModuleInfo::parse(&mut it);
 
