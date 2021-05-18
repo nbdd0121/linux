@@ -97,10 +97,10 @@ fn parse_list<T>(
     vec
 }
 
-fn get_literal(it: &mut Cursor<'_>, expected_name: &str) -> String {
+fn get_literal(it: &mut Cursor<'_>, expected_name: &str) -> Literal {
     assert_eq!(expect_ident(it), expected_name);
     assert_eq!(expect_punct(it), ':');
-    let literal = expect_literal(it).to_string();
+    let literal = expect_literal(it);
     assert_eq!(expect_punct(it), ',');
     literal
 }
@@ -192,20 +192,8 @@ impl<'a> ModInfoBuilder<'a> {
     }
 }
 
-fn permissions_are_readonly(perms: &str) -> bool {
-    let (radix, digits) = if let Some(n) = perms.strip_prefix("0x") {
-        (16, n)
-    } else if let Some(n) = perms.strip_prefix("0o") {
-        (8, n)
-    } else if let Some(n) = perms.strip_prefix("0b") {
-        (2, n)
-    } else {
-        (10, perms)
-    };
-    match u32::from_str_radix(digits, radix) {
-        Ok(perms) => perms & 0o222 == 0,
-        Err(_) => false,
-    }
+fn permissions_are_readonly(perms: u32) -> bool {
+    perms & 0o222 == 0
 }
 
 fn param_ops_path(param_type: &str) -> &'static str {
@@ -289,19 +277,53 @@ fn generated_array_ops_name(vals: &str, max_length: usize) -> String {
     )
 }
 
+struct ParamInfo {
+    name: String,
+    type_: ParamType,
+    default: String,
+    permission: u32,
+    description: String,
+}
+
+impl ParamInfo {
+    fn parse(it: &mut Cursor<'_>) -> Self {
+        let param_name = expect_ident(it);
+
+        assert_eq!(expect_punct(it), ':');
+        let param_type = expect_type(it);
+        let mut param_it = expect_group(it, Delimiter::Brace);
+
+        let param_default = get_default(&param_type, &mut param_it);
+        let param_permissions = match Lit::new(get_literal(&mut param_it, "permissions")) {
+            Lit::Int(i) => i.base10_digits().parse::<u32>().unwrap(),
+            _ => panic!("Permission is expected to be an integer literal"),
+        };
+        let param_description = get_string(&mut param_it, "description");
+        expect_end(&mut param_it);
+
+        ParamInfo {
+            name: param_name,
+            type_: param_type,
+            default: param_default,
+            permission: param_permissions,
+            description: param_description,
+        }
+    }
+}
+
 #[derive(Default)]
-struct ModuleInfo<'a> {
+struct ModuleInfo {
     type_: String,
     license: String,
     name: String,
     author: Option<String>,
     description: Option<String>,
     alias: Option<String>,
-    params: Option<Cursor<'a>>,
+    params: Vec<ParamInfo>,
 }
 
-impl<'a> ModuleInfo<'a> {
-    fn parse(it: &mut Cursor<'a>) -> Self {
+impl ModuleInfo {
+    fn parse(it: &mut Cursor<'_>) -> Self {
         let mut info = ModuleInfo::default();
 
         const EXPECTED_KEYS: &[&str] = &[
@@ -341,7 +363,7 @@ impl<'a> ModuleInfo<'a> {
                 "license" => info.license = expect_string(it),
                 "alias" => info.alias = Some(expect_string(it)),
                 "alias_rtnl_link" => info.alias = Some(format!("rtnl-link-{}", expect_string(it))),
-                "params" => info.params = Some(expect_group(it, Delimiter::Brace)),
+                "params" => info.params = parse_list(it, Delimiter::Brace, ParamInfo::parse),
                 _ => panic!(
                     "Unknown key \"{}\". Valid keys are: {:?}.",
                     key, EXPECTED_KEYS
@@ -377,51 +399,24 @@ impl<'a> ModuleInfo<'a> {
 
         info
     }
-}
 
-pub fn module(ts: TokenStream) -> TokenStream {
-    let buffer = TokenBuffer::new(ts);
-    let mut it = buffer.begin();
+    fn generate(&self) -> TokenStream {
+        let mut modinfo = ModInfoBuilder::new(&self.name);
+        modinfo.emit_optional("author", self.author.as_deref());
+        modinfo.emit_optional("description", self.description.as_deref());
+        modinfo.emit("license", &self.license);
+        modinfo.emit_optional("alias", self.alias.as_deref());
 
-    let info = ModuleInfo::parse(&mut it);
+        // Built-in modules also export the `file` modinfo string
+        let file = std::env::var("RUST_MODFILE")
+            .expect("Unable to fetch RUST_MODFILE environmental variable");
+        modinfo.emit_only_builtin("file", &file);
 
-    let name = info.name.clone();
-
-    let mut modinfo = ModInfoBuilder::new(&name);
-    modinfo.emit_optional("author", info.author.as_deref());
-    modinfo.emit_optional("description", info.description.as_deref());
-    modinfo.emit("license", &info.license);
-    modinfo.emit_optional("alias", info.alias.as_deref());
-
-    // Built-in modules also export the `file` modinfo string
-    let file =
-        std::env::var("RUST_MODFILE").expect("Unable to fetch RUST_MODFILE environmental variable");
-    modinfo.emit_only_builtin("file", &file);
-
-    let mut array_types_to_generate = Vec::new();
-    if let Some(params) = info.params {
-        let mut it = params;
-
-        loop {
-            if it.eof() {
-                break;
-            }
-
-            let param_name = expect_ident(&mut it);
-
-            assert_eq!(expect_punct(&mut it), ':');
-            let param_type = expect_type(&mut it);
-            let mut param_it = expect_group(&mut it, Delimiter::Brace);
-            assert_eq!(expect_punct(&mut it), ',');
-
-            let param_default = get_default(&param_type, &mut param_it);
-            let param_permissions = get_literal(&mut param_it, "permissions");
-            let param_description = get_string(&mut param_it, "description");
-            expect_end(&mut param_it);
-
+        let mut array_types_to_generate = Vec::new();
+        for param in self.params.iter() {
             // TODO: more primitive types
             // TODO: other kinds: unsafes, etc.
-            let (param_kernel_type, ops): (String, _) = match param_type {
+            let (param_kernel_type, ops): (String, _) = match param.type_ {
                 ParamType::Ident(ref param_type) => (
                     param_type.to_string(),
                     param_ops_path(&param_type).to_string(),
@@ -438,9 +433,9 @@ pub fn module(ts: TokenStream) -> TokenStream {
                 }
             };
 
-            modinfo.emit_param("parmtype", &param_name, &param_kernel_type);
-            modinfo.emit_param("parm", &param_name, &param_description);
-            let param_type_internal = match param_type {
+            modinfo.emit_param("parmtype", &param.name, &param_kernel_type);
+            modinfo.emit_param("parm", &param.name, &param.description);
+            let param_type_internal = match param.type_ {
                 ParamType::Ident(ref param_type) => match param_type.as_ref() {
                     "str" => "kernel::module_param::StringParam".to_string(),
                     other => other.to_string(),
@@ -454,7 +449,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
                     max_length = max_length
                 ),
             };
-            let read_func = if permissions_are_readonly(&param_permissions) {
+            let read_func = if permissions_are_readonly(param.permission) {
                 format!(
                     "
                         fn read(&self) -> &<{param_type_internal} as kernel::module_param::ModuleParam>::Value {{
@@ -462,8 +457,8 @@ pub fn module(ts: TokenStream) -> TokenStream {
                             unsafe {{ <{param_type_internal} as kernel::module_param::ModuleParam>::value(&__{name}_{param_name}_value) }}
                         }}
                     ",
-                    name = name,
-                    param_name = param_name,
+                    name = self.name,
+                    param_name = param.name,
                     param_type_internal = param_type_internal,
                 )
             } else {
@@ -474,8 +469,8 @@ pub fn module(ts: TokenStream) -> TokenStream {
                             unsafe {{ <{param_type_internal} as kernel::module_param::ModuleParam>::value(&__{name}_{param_name}_value) }}
                         }}
                     ",
-                    name = name,
-                    param_name = param_name,
+                    name = self.name,
+                    param_name = param.name,
                     param_type_internal = param_type_internal,
                 )
             };
@@ -485,8 +480,8 @@ pub fn module(ts: TokenStream) -> TokenStream {
                         arg: unsafe {{ &__{name}_{param_name}_value }} as *const _ as *mut kernel::c_types::c_void,
                     }},
                 ",
-                name = name,
-                param_name = param_name,
+                name = self.name,
+                param_name = param.name,
             );
             modinfo.buffer.push_str(
                 &format!(
@@ -534,136 +529,145 @@ pub fn module(ts: TokenStream) -> TokenStream {
                         __bindgen_anon_1: {kparam}
                     }});
                     ",
-                    name = name,
+                    name = self.name,
                     param_type_internal = param_type_internal,
                     read_func = read_func,
-                    param_default = param_default,
-                    param_name = param_name,
+                    param_default = param.default,
+                    param_name = param.name,
                     ops = ops,
-                    permissions = param_permissions,
+                    permissions = param.permission,
                     kparam = kparam,
                 )
             );
         }
-    }
 
-    let mut generated_array_types = String::new();
+        let mut generated_array_types = String::new();
 
-    for (vals, max_length) in array_types_to_generate {
-        let ops_name = generated_array_ops_name(&vals, max_length);
-        generated_array_types.push_str(&format!(
+        for (vals, max_length) in array_types_to_generate {
+            let ops_name = generated_array_ops_name(&vals, max_length);
+            generated_array_types.push_str(&format!(
+                "
+                    kernel::make_param_ops!(
+                        {ops_name},
+                        kernel::module_param::ArrayParam<{vals}, {{ {max_length} }}>
+                    );
+                ",
+                ops_name = ops_name,
+                vals = vals,
+                max_length = max_length,
+            ));
+        }
+
+        format!(
             "
-                kernel::make_param_ops!(
-                    {ops_name},
-                    kernel::module_param::ArrayParam<{vals}, {{ {max_length} }}>
+                /// The module name.
+                ///
+                /// Used by the printing macros, e.g. [`info!`].
+                const __LOG_PREFIX: &[u8] = b\"{name}\\0\";
+
+                static mut __MOD: Option<{type_}> = None;
+
+                // SAFETY: `__this_module` is constructed by the kernel at load time and will not be freed until the module is unloaded.
+                #[cfg(MODULE)]
+                static THIS_MODULE: kernel::ThisModule = unsafe {{ kernel::ThisModule::from_ptr(&kernel::bindings::__this_module as *const _ as *mut _) }};
+                #[cfg(not(MODULE))]
+                static THIS_MODULE: kernel::ThisModule = unsafe {{ kernel::ThisModule::from_ptr(core::ptr::null_mut()) }};
+
+                // Loadable modules need to export the `{{init,cleanup}}_module` identifiers
+                #[cfg(MODULE)]
+                #[no_mangle]
+                pub extern \"C\" fn init_module() -> kernel::c_types::c_int {{
+                    __init()
+                }}
+
+                #[cfg(MODULE)]
+                #[no_mangle]
+                pub extern \"C\" fn cleanup_module() {{
+                    __exit()
+                }}
+
+                // Built-in modules are initialized through an initcall pointer
+                // and the identifiers need to be unique
+                #[cfg(not(MODULE))]
+                #[cfg(not(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS))]
+                #[link_section = \"{initcall_section}\"]
+                #[used]
+                pub static __{name}_initcall: extern \"C\" fn() -> kernel::c_types::c_int = __{name}_init;
+
+                #[cfg(not(MODULE))]
+                #[cfg(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS)]
+                global_asm!(
+                    r#\".section \"{initcall_section}\", \"a\"
+                    __{name}_initcall:
+                        .long   __{name}_init - .
+                        .previous
+                    \"#
                 );
-            ",
-            ops_name = ops_name,
-            vals = vals,
-            max_length = max_length,
-        ));
-    }
 
-    format!(
-        "
-            /// The module name.
-            ///
-            /// Used by the printing macros, e.g. [`info!`].
-            const __LOG_PREFIX: &[u8] = b\"{name}\\0\";
+                #[cfg(not(MODULE))]
+                #[no_mangle]
+                pub extern \"C\" fn __{name}_init() -> kernel::c_types::c_int {{
+                    __init()
+                }}
 
-            static mut __MOD: Option<{type_}> = None;
+                #[cfg(not(MODULE))]
+                #[no_mangle]
+                pub extern \"C\" fn __{name}_exit() {{
+                    __exit()
+                }}
 
-            // SAFETY: `__this_module` is constructed by the kernel at load time and will not be freed until the module is unloaded.
-            #[cfg(MODULE)]
-            static THIS_MODULE: kernel::ThisModule = unsafe {{ kernel::ThisModule::from_ptr(&kernel::bindings::__this_module as *const _ as *mut _) }};
-            #[cfg(not(MODULE))]
-            static THIS_MODULE: kernel::ThisModule = unsafe {{ kernel::ThisModule::from_ptr(core::ptr::null_mut()) }};
-
-            // Loadable modules need to export the `{{init,cleanup}}_module` identifiers
-            #[cfg(MODULE)]
-            #[no_mangle]
-            pub extern \"C\" fn init_module() -> kernel::c_types::c_int {{
-                __init()
-            }}
-
-            #[cfg(MODULE)]
-            #[no_mangle]
-            pub extern \"C\" fn cleanup_module() {{
-                __exit()
-            }}
-
-            // Built-in modules are initialized through an initcall pointer
-            // and the identifiers need to be unique
-            #[cfg(not(MODULE))]
-            #[cfg(not(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS))]
-            #[link_section = \"{initcall_section}\"]
-            #[used]
-            pub static __{name}_initcall: extern \"C\" fn() -> kernel::c_types::c_int = __{name}_init;
-
-            #[cfg(not(MODULE))]
-            #[cfg(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS)]
-            global_asm!(
-                r#\".section \"{initcall_section}\", \"a\"
-                __{name}_initcall:
-                    .long   __{name}_init - .
-                    .previous
-                \"#
-            );
-
-            #[cfg(not(MODULE))]
-            #[no_mangle]
-            pub extern \"C\" fn __{name}_init() -> kernel::c_types::c_int {{
-                __init()
-            }}
-
-            #[cfg(not(MODULE))]
-            #[no_mangle]
-            pub extern \"C\" fn __{name}_exit() {{
-                __exit()
-            }}
-
-            fn __init() -> kernel::c_types::c_int {{
-                match <{type_} as kernel::KernelModule>::init() {{
-                    Ok(m) => {{
-                        unsafe {{
-                            __MOD = Some(m);
+                fn __init() -> kernel::c_types::c_int {{
+                    match <{type_} as kernel::KernelModule>::init() {{
+                        Ok(m) => {{
+                            unsafe {{
+                                __MOD = Some(m);
+                            }}
+                            return 0;
                         }}
-                        return 0;
-                    }}
-                    Err(e) => {{
-                        return e.to_kernel_errno();
+                        Err(e) => {{
+                            return e.to_kernel_errno();
+                        }}
                     }}
                 }}
-            }}
 
-            fn __exit() {{
-                unsafe {{
-                    // Invokes `drop()` on `__MOD`, which should be used for cleanup.
-                    __MOD = None;
+                fn __exit() {{
+                    unsafe {{
+                        // Invokes `drop()` on `__MOD`, which should be used for cleanup.
+                        __MOD = None;
+                    }}
                 }}
-            }}
 
-            {modinfo}
+                {modinfo}
 
-            {generated_array_types}
-        ",
-        type_ = info.type_,
-        name = info.name,
-        modinfo = modinfo.buffer,
-        generated_array_types = generated_array_types,
-        initcall_section = ".initcall6.init"
-    ).parse().expect("Error parsing formatted string into token stream.")
+                {generated_array_types}
+            ",
+            type_ = self.type_,
+            name = self.name,
+            modinfo = modinfo.buffer,
+            generated_array_types = generated_array_types,
+            initcall_section = ".initcall6.init"
+        ).parse().expect("Error parsing formatted string into token stream.")
+    }
+}
+
+pub fn module(ts: TokenStream) -> TokenStream {
+    let buffer = TokenBuffer::new(ts);
+    let mut it = buffer.begin();
+
+    let info = ModuleInfo::parse(&mut it);
+    info.generate()
 }
 
 pub fn module_misc_device(ts: TokenStream) -> TokenStream {
     let buffer = TokenBuffer::new(ts);
     let mut it = buffer.begin();
 
-    let info = ModuleInfo::parse(&mut it);
+    let mut info = ModuleInfo::parse(&mut it);
+    let type_ = info.type_;
+    let module = format!("__internal_ModuleFor{}", type_);
+    info.type_ = module.clone();
 
-    let module = format!("__internal_ModuleFor{}", info.type_);
-
-    format!(
+    let extra = format!(
         "
             #[doc(hidden)]
             struct {module} {{
@@ -681,33 +685,13 @@ pub fn module_misc_device(ts: TokenStream) -> TokenStream {
                     }})
                 }}
             }}
-
-            kernel::prelude::module! {{
-                type: {module},
-                name: {name},
-                {author}
-                {description}
-                license: {license},
-                {alias}
-            }}
         ",
         module = module,
-        type_ = info.type_,
+        type_ = type_,
         name = Literal::string(&info.name),
-        author = info
-            .author
-            .map(|v| format!("author: {},", Literal::string(&v)))
-            .unwrap_or_else(|| "".to_string()),
-        description = info
-            .description
-            .map(|v| format!("description: {},", Literal::string(&v)))
-            .unwrap_or_else(|| "".to_string()),
-        alias = info
-            .alias
-            .map(|v| format!("alias: {},", Literal::string(&v)))
-            .unwrap_or_else(|| "".to_string()),
-        license = Literal::string(&info.license)
     )
     .parse()
-    .expect("Error parsing formatted string into token stream.")
+    .expect("Error parsing formatted string into token stream.");
+
+    vec![extra, info.generate()].into_iter().collect()
 }
