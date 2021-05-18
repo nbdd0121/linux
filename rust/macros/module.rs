@@ -97,6 +97,18 @@ fn parse_list<T>(
     vec
 }
 
+fn parse_item_or_list<T>(
+    it: &mut Cursor<'_>,
+    delim: Delimiter,
+    f: impl Fn(&mut Cursor<'_>) -> T,
+) -> Vec<T> {
+    if it.group(delim).is_some() {
+        parse_list(it, delim, f)
+    } else {
+        vec![f(it)]
+    }
+}
+
 fn get_literal(it: &mut Cursor<'_>, expected_name: &str) -> Literal {
     assert_eq!(expect_ident(it), expected_name);
     assert_eq!(expect_punct(it), ':');
@@ -316,9 +328,9 @@ struct ModuleInfo {
     type_: String,
     license: String,
     name: String,
-    author: Option<String>,
+    author: Vec<String>,
     description: Option<String>,
-    alias: Option<String>,
+    alias: Vec<String>,
     params: Vec<ParamInfo>,
 }
 
@@ -358,11 +370,16 @@ impl ModuleInfo {
             match key.as_str() {
                 "type" => info.type_ = expect_ident(it),
                 "name" => info.name = expect_string(it),
-                "author" => info.author = Some(expect_string(it)),
+                "author" => info.author = parse_item_or_list(it, Delimiter::Bracket, expect_string),
                 "description" => info.description = Some(expect_string(it)),
                 "license" => info.license = expect_string(it),
-                "alias" => info.alias = Some(expect_string(it)),
-                "alias_rtnl_link" => info.alias = Some(format!("rtnl-link-{}", expect_string(it))),
+                "alias" => info.alias = parse_item_or_list(it, Delimiter::Bracket, expect_string),
+                "alias_rtnl_link" => {
+                    info.alias = parse_item_or_list(it, Delimiter::Bracket, expect_string)
+                        .into_iter()
+                        .map(|x| format!("rtnl-link-{}", x))
+                        .collect()
+                }
                 "params" => info.params = parse_list(it, Delimiter::Brace, ParamInfo::parse),
                 _ => panic!(
                     "Unknown key \"{}\". Valid keys are: {:?}.",
@@ -402,10 +419,14 @@ impl ModuleInfo {
 
     fn generate(&self) -> TokenStream {
         let mut modinfo = ModInfoBuilder::new(&self.name);
-        modinfo.emit_optional("author", self.author.as_deref());
+        for author in self.author.iter() {
+            modinfo.emit("author", author);
+        }
         modinfo.emit_optional("description", self.description.as_deref());
         modinfo.emit("license", &self.license);
-        modinfo.emit_optional("alias", self.alias.as_deref());
+        for alias in self.alias.iter() {
+            modinfo.emit("alias", alias);
+        }
 
         // Built-in modules also export the `file` modinfo string
         let file = std::env::var("RUST_MODFILE")
