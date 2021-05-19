@@ -226,13 +226,26 @@ fn param_ops_path(param_type: &str) -> &'static str {
     }
 }
 
+fn parse_expr(it: &mut Cursor<'_>) -> TokenStream {
+    let mut tt = Vec::new();
+    while !it.eof() {
+        if let Some((punct, _)) = it.punct() {
+            if let ',' | ';' = punct.as_char() {
+                break;
+            }
+        }
+        let (token, next) = it.token_tree().unwrap();
+        tt.push(token);
+        *it = next;
+    }
+    if tt.is_empty() {
+        panic!("Expected expression");
+    }
+    tt.into_iter().collect()
+}
+
 fn expect_simple_param_val(param_type: &str) -> Box<dyn Fn(&mut Cursor<'_>) -> String> {
     match param_type {
-        "bool" => Box::new(|param_it| {
-            let (ident, next) = param_it.ident().expect("Expected ident");
-            *param_it = next;
-            ident.to_string()
-        }),
         "str" => Box::new(|param_it| {
             let s = expect_string(param_it);
             format!(
@@ -240,11 +253,7 @@ fn expect_simple_param_val(param_type: &str) -> Box<dyn Fn(&mut Cursor<'_>) -> S
                 Literal::byte_string(s.as_bytes())
             )
         }),
-        _ => Box::new(|param_it| {
-            let (lit, next) = param_it.literal().expect("Expected literal");
-            *param_it = next;
-            lit.to_string()
-        }),
+        _ => Box::new(|param_it| parse_expr(param_it).to_string()),
     }
 }
 
