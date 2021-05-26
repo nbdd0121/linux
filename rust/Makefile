@@ -35,12 +35,7 @@ quiet_cmd_rustdoc = RUSTDOC $<
 		--output $(objtree)/rust/doc --crate-name $(subst rustdoc-,,$@) \
 		-Fmissing-docs @$(objtree)/include/generated/rustc_cfg $<
 
-rustdoc: rustdoc-macros rustdoc-compiler_builtins rustdoc-kernel
-
-rustdoc-macros: private rustdoc_target_flags = --crate-type proc-macro \
-    --extern proc_macro
-rustdoc-macros: $(srctree)/rust/macros/lib.rs FORCE
-	$(call if_changed,rustdoc_host)
+rustdoc: rustdoc-compiler_builtins rustdoc-kernel
 
 rustdoc-compiler_builtins: $(srctree)/rust/compiler_builtins.rs FORCE
 	$(call if_changed,rustdoc)
@@ -48,7 +43,7 @@ rustdoc-compiler_builtins: $(srctree)/rust/compiler_builtins.rs FORCE
 rustdoc-kernel: private rustdoc_target_flags = --extern alloc \
     --extern build_error \
     --extern macros=$(objtree)/rust/libmacros.so
-rustdoc-kernel: $(srctree)/rust/kernel/lib.rs rustdoc-macros \
+rustdoc-kernel: $(srctree)/rust/kernel/lib.rs \
     $(objtree)/rust/libmacros.so $(objtree)/rust/bindings_generated.rs FORCE
 	$(call if_changed,rustdoc)
 
@@ -113,22 +108,27 @@ $(objtree)/rust/exports_alloc_generated.h: $(objtree)/rust/alloc.o FORCE
 $(objtree)/rust/exports_kernel_generated.h: $(objtree)/rust/kernel.o FORCE
 	$(call if_changed,exports)
 
+CARGO = cargo
+
 # `-Cpanic=unwind -Cforce-unwind-tables=y` overrides `rustc_flags` in order to
 # avoid the https://github.com/rust-lang/rust/issues/82320 rustc crash.
-quiet_cmd_rustc_procmacro = $(RUSTC_OR_CLIPPY_QUIET) P $@
+quiet_cmd_rustc_procmacro = CARGO P $@
       cmd_rustc_procmacro = \
-	$(RUSTC_OR_CLIPPY) $(rustc_flags) \
-		--emit=dep-info,link --extern proc_macro \
-		-Cpanic=unwind -Cforce-unwind-tables=y \
-		--crate-type proc-macro --out-dir $(objtree)/rust/ \
-		--crate-name $(patsubst lib%.so,%,$(notdir $@)) $<; \
-	mv $(objtree)/rust/$(patsubst lib%.so,%,$(notdir $@)).d $(depfile); \
+	$(CARGO) build --locked --offline --release \
+		--manifest-path $< \
+		--target-dir $(objtree)/rust/target; \
+	cp $(objtree)/rust/target/release/$(notdir $@) $@; \
+	mv $(objtree)/rust/target/release/$(patsubst %.so,%,$(notdir $@)).d $(depfile); \
+	sed -i 's/build.rs//' $(depfile); \
 	sed -i '/^\#/d' $(depfile)
+
+rust-fetch-deps:
+	$(CARGO) fetch --locked --manifest-path $(srctree)/rust/macros/Cargo.toml
 
 # Procedural macros can only be used with the `rustc` that compiled it.
 # Therefore, to get `libmacros.so` automatically recompiled when the compiler
 # version changes, we add `core.o` as a dependency (even if it is not needed).
-$(objtree)/rust/libmacros.so: $(srctree)/rust/macros/lib.rs \
+$(objtree)/rust/libmacros.so: $(srctree)/rust/macros/Cargo.toml \
 	$(objtree)/rust/core.o FORCE
 	$(call if_changed_dep,rustc_procmacro)
 

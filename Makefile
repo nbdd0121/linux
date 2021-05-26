@@ -270,7 +270,7 @@ no-dot-config-targets := $(clean-targets) \
 			 cscope gtags TAGS tags help% %docs check% coccicheck \
 			 $(version_h) headers headers_% archheaders archscripts \
 			 %asm-generic kernelversion %src-pkg dt_binding_check \
-			 outputmakefile rustfmt rustfmtcheck
+			 outputmakefile rustfmt rustfmtcheck rust-fetch-deps
 no-sync-config-targets := $(no-dot-config-targets) %install kernelrelease \
 			  image_name
 single-targets := %.a %.i %.ko %.lds %.ll %.lst %.mod %.o %.s %.symtypes %/
@@ -1831,6 +1831,11 @@ rustfmt:
 
 rustfmtcheck:
 	find $(srctree) -type f -name '*.rs' | xargs $(RUSTFMT) --check
+
+# Procedural macros dependency fetch
+PHONY += rust-fetch-deps
+rust-fetch-deps:
+	$(Q)$(MAKE) $(build)=rust $@
 
 # IDE support targets
 PHONY += rust-analyzer

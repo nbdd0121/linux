@@ -89,6 +89,18 @@ Install it via (this will build the tool from source)::
     cargo install --locked --version 0.56.0 bindgen
 
 
+Procedural macro dependencies
+*****************************
+
+We use procedural macros that need to parse Rust code. We depend on a few
+well-established crates in Rust community (`syn`, `quote` and `proc-macro2`)
+for this task.
+
+Fetch them via::
+
+    make rust-fetch-deps
+
+
 Requirements: Developing
 ------------------------
 
