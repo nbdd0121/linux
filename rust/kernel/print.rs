@@ -95,49 +95,51 @@ impl LogLevel {
     pub const CONT: Self = Self(bindings::KERN_CONT);
 }
 
-/// Prints an [`Arguments`] via the kernel's [`printk`] with prefix.
-///
-/// [`printk`]: ../../../../include/linux/printk.h
-/// [`Arguments`]: fmt::Arguments
-#[doc(hidden)]
-#[cfg(not(testlib))]
-pub fn call_printk(lvl: LogLevel, prefix: &CStr, args: fmt::Arguments<'_>) {
-    // `printk` does not seem to fail in any path.
-    // SAFETY: The format string is fixed.
-    unsafe {
-        bindings::printk(
-            c_str!("%s%s: %pA").as_char_ptr(),
-            lvl.0.as_ptr(),
-            prefix.as_char_ptr(),
-            &args as *const _ as *const c_void,
-        );
+/// Trait for types that can be used as the `target` field or printk macro family.
+pub trait LogTarget {
+    /// Log with this target.
+    fn printk(&self, lvl: LogLevel, args: fmt::Arguments<'_>);
+}
+
+impl<T: ?Sized + LogTarget> LogTarget for &T {
+    #[inline]
+    fn printk(&self, lvl: LogLevel, args: fmt::Arguments<'_>) {
+        (*self).printk(lvl, args);
     }
 }
 
-/// Stub for doctests
-#[cfg(testlib)]
-pub fn call_printk(_lvl: LogLevel, _prefix: &CStr, _args: fmt::Arguments<'_>) {}
-
-/// Prints an [`Arguments`] via the kernel's [`printk`] without prefix.
-///
-/// [`printk`]: ../../../../include/linux/printk.h
-/// [`Arguments`]: fmt::Arguments
-#[doc(hidden)]
-#[cfg(not(testlib))]
-pub fn call_printk_cont(lvl: LogLevel, args: fmt::Arguments<'_>) {
-    // SAFETY: The format string is fixed.
-    unsafe {
-        bindings::printk(
-            c_str!("%s%pA").as_char_ptr(),
-            lvl.0.as_ptr(),
-            &args as *const _ as *const c_void,
-        );
+impl LogTarget for () {
+    #[inline]
+    #[cfg(not(testlib))]
+    fn printk(&self, lvl: LogLevel, args: fmt::Arguments<'_>) {
+        // SAFETY: The format string is fixed.
+        unsafe {
+            bindings::printk(c_str!("%s%pA").as_char_ptr(), lvl.0.as_ptr(), &args);
+        }
     }
+
+    #[cfg(testlib)]
+    fn printk(&self, _lvl: LogLevel, _args: fmt::Arguments<'_>) {}
 }
 
-/// Stub for doctests
-#[cfg(testlib)]
-pub fn call_printk_cont(_lvl: LogLevel, _args: fmt::Arguments<'_>) {}
+impl LogTarget for CStr {
+    #[inline]
+    #[cfg(not(testlib))]
+    fn printk(&self, lvl: LogLevel, args: fmt::Arguments<'_>) {
+        // SAFETY: The format string is fixed.
+        unsafe {
+            bindings::printk(
+                c_str!("%s%s: %pA").as_char_ptr(),
+                lvl.0.as_ptr(),
+                self.as_char_ptr(),
+                &args,
+            );
+        }
+    }
+
+    #[cfg(testlib)]
+    fn printk(&self, _lvl: LogLevel, _args: fmt::Arguments<'_>) {}
+}
 
 /// Prints a message with the specified log level.
 ///
@@ -160,9 +162,9 @@ pub fn call_printk_cont(_lvl: LogLevel, _args: fmt::Arguments<'_>) {}
 #[macro_export]
 macro_rules! printk (
     (target: $target:expr, $lvl:expr, $($arg:tt)+) => {{
-        $crate::print::call_printk(
+        $crate::print::LogTarget::printk(
+            &($target),
             $lvl,
-            $target,
             format_args!($($arg)*)
         )
     }};
@@ -176,9 +178,9 @@ macro_rules! printk (
 #[macro_export]
 macro_rules! printk (
     (target: $target:expr, $lvl:expr, $($arg:tt)+) => {{
-        $crate::print::call_printk(
+        $crate::print::LogTarget::printk(
+            &($target),
             $lvl,
-            $target,
             format_args!($($arg)*)
         )
     }};
@@ -450,6 +452,6 @@ macro_rules! pr_debug (
 #[macro_export]
 macro_rules! pr_cont (
     ($($arg:tt)*) => {{
-        $crate::print::call_printk_cont($crate::print::LogLevel::CONT, format_args!($($arg)*))
+        $crate::print::LogTarget::printk(&(), $crate::print::LogLevel::CONT, format_args!($($arg)*))
     }}
 );
