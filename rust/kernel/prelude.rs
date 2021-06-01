@@ -23,4 +23,4 @@ pub use super::static_assert;
 
 pub use super::{KernelModule, Result};
 
-pub use crate::traits::TryPin;
+pub use crate::traits::{TryPin, TryToOwned, VecExt as _};

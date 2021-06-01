@@ -5,6 +5,7 @@
 //! C header: [`include/linux/moduleparam.h`](../../../include/linux/moduleparam.h)
 
 use crate::str::CStr;
+use crate::traits::TryToOwned;
 use core::fmt::Write;
 
 /// Types that can be used for module parameters.
@@ -475,9 +476,7 @@ impl ModuleParam for StringParam {
         let slab_available = unsafe { crate::bindings::slab_is_available() };
         arg.and_then(|arg| {
             if slab_available {
-                let mut vec = alloc::vec::Vec::new();
-                vec.try_reserve_exact(arg.len()).ok()?;
-                vec.extend_from_slice(arg);
+                let vec = arg.try_to_owned().ok()?;
                 Some(StringParam::Owned(vec))
             } else {
                 Some(StringParam::Ref(arg))
