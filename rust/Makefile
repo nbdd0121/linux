@@ -109,7 +109,7 @@ quiet_cmd_rustdoc = RUSTDOC $(if $(rustdoc_host),H, ) $<
 	OBJTREE=$(abspath $(objtree)) \
 	$(RUSTDOC) $(if $(rustdoc_host),$(rust_common_flags),$(rust_flags)) \
 		$(rustc_target_flags) -L$(objtree)/$(obj) \
-		--extern quote --extern syn \
+		--extern proc_macro2 --extern quote --extern syn \
 		--output $(objtree)/$(obj)/doc \
 		--crate-name $(subst rustdoc-,,$@) \
 		@$(objtree)/include/generated/rustc_cfg $<
@@ -198,7 +198,7 @@ rusttestlib-syn: $(src)/syn/lib.rs rusttestlib-quote FORCE
 	$(call if_changed,rustc_test_library)
 
 rusttestlib-macros: private rustc_target_flags = --extern proc_macro \
-    --extern quote --extern syn
+    --extern proc_macro2 --extern quote --extern syn
 rusttestlib-macros: private rustc_test_library_proc = yes
 rusttestlib-macros: $(src)/macros/lib.rs rusttestlib-syn FORCE
 	$(call if_changed,rustc_test_library)
@@ -451,7 +451,7 @@ quiet_cmd_rustc_procmacro = $(RUSTC_OR_CLIPPY_QUIET) P $@
       cmd_rustc_procmacro = \
 	$(RUSTC_OR_CLIPPY) $(rust_common_flags) \
 		--emit=dep-info,link --extern proc_macro \
-		--extern quote --extern syn --crate-type proc-macro \
+		--extern proc_macro2 --extern quote --extern syn --crate-type proc-macro \
 		--out-dir $(objtree)/$(obj) -L$(objtree)/$(obj) \
 		--crate-name $(patsubst lib%.so,%,$(notdir $@)) $<; \
 	mv $(objtree)/$(obj)/$(patsubst lib%.so,%,$(notdir $@)).d $(depfile); \

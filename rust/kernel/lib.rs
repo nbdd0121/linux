@@ -80,6 +80,7 @@ pub mod unsafe_list;
 pub mod module_param;
 
 mod build_assert;
+pub mod pin;
 pub mod prelude;
 pub mod print;
 pub mod random;

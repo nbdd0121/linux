@@ -6,8 +6,10 @@ mod concat_idents;
 mod helpers;
 mod module;
 mod vtable;
+mod pin_init;
 
 use proc_macro::TokenStream;
+use syn::Error;
 
 /// Declares a kernel module.
 ///
@@ -188,4 +190,26 @@ pub fn vtable(attr: TokenStream, ts: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn concat_idents(ts: TokenStream) -> TokenStream {
     concat_idents::concat_idents(ts)
+}
+
+#[proc_macro_attribute]
+pub fn pin_init(attr: TokenStream, input: TokenStream) -> TokenStream {
+    pin_init::pin_init_attr(attr.into(), input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+#[doc(hidden)]
+#[proc_macro_derive(PinInit, attributes(pin))]
+pub fn pin_init_derive(input: TokenStream) -> TokenStream {
+    pin_init::pin_init_derive(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+#[proc_macro]
+pub fn init_pin(input: TokenStream) -> TokenStream {
+    pin_init::init_pin(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
