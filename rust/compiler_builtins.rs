@@ -28,7 +28,7 @@ macro_rules! define_panicking_intrinsics(
     ($reason: tt, { $($ident: ident, )* }) => {
         $(
             #[doc(hidden)]
-            #[no_mangle]
+            #[export_name = concat!("__rust", stringify!($ident))]
             pub extern "C" fn $ident() {
                 panic!($reason);
             }
