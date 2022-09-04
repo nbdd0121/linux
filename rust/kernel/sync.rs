@@ -8,13 +8,12 @@
 //! # Examples
 //!
 //! ```
-//! # use kernel::mutex_init;
+//! # use kernel::mutex_new;
 //! # use kernel::sync::Mutex;
 //! # use alloc::boxed::Box;
 //! # use core::pin::Pin;
-//! // SAFETY: `init` is called below.
-//! let mut data = Pin::from(Box::try_new(unsafe { Mutex::new(10) }).unwrap());
-//! mutex_init!(data.as_mut(), "test::data");
+//! # use kernel::prelude::*;
+//! let mut data = Box::try_new_pin(mutex_new!("test::data", 10));
 //!
 //! assert_eq!(*data.lock(), 10);
 //! *data.lock() = 20;

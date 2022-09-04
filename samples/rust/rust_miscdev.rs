@@ -24,27 +24,24 @@ struct SharedStateInner {
     token_count: usize,
 }
 
+#[pin_init]
 struct SharedState {
     state_changed: CondVar,
+    #[pin]
     inner: Mutex<SharedStateInner>,
 }
 
 impl SharedState {
     fn try_new() -> Result<Arc<Self>> {
-        let mut state = Pin::from(UniqueArc::try_new(Self {
+        let mut state = Pin::from(UniqueArc::try_pin_with(init_pin!(Self {
             // SAFETY: `condvar_init!` is called below.
             state_changed: unsafe { CondVar::new() },
-            // SAFETY: `mutex_init!` is called below.
-            inner: unsafe { Mutex::new(SharedStateInner { token_count: 0 }) },
-        })?);
+            inner: kernel::mutex_new!("SharedState::inner", SharedStateInner { token_count: 0 }),
+        }))?);
 
         // SAFETY: `state_changed` is pinned when `state` is.
         let pinned = unsafe { state.as_mut().map_unchecked_mut(|s| &mut s.state_changed) };
         kernel::condvar_init!(pinned, "SharedState::state_changed");
-
-        // SAFETY: `inner` is pinned when `state` is.
-        let pinned = unsafe { state.as_mut().map_unchecked_mut(|s| &mut s.inner) };
-        kernel::mutex_init!(pinned, "SharedState::inner");
 
         Ok(state.into())
     }

@@ -241,6 +241,7 @@ impl ProcessNodeRefs {
     }
 }
 
+#[pin_init]
 pub(crate) struct Process {
     ctx: Arc<Context>,
 
@@ -254,10 +255,12 @@ pub(crate) struct Process {
     // lock. We may want to split up the process state at some point to use a spin lock for the
     // other fields.
     // TODO: Make this private again.
+    #[pin]
     pub(crate) inner: Mutex<ProcessInner>,
 
     // References are in a different mutex to avoid recursive acquisition when
     // incrementing/decrementing a node in another process.
+    #[pin]
     node_refs: Mutex<ProcessNodeRefs>,
 }
 
@@ -267,24 +270,13 @@ unsafe impl Sync for Process {}
 
 impl Process {
     fn new(ctx: Arc<Context>, cred: ARef<Credential>) -> Result<Arc<Self>> {
-        let mut process = Pin::from(UniqueArc::try_new(Self {
+        let mut process = UniqueArc::try_pin_with(init_pin!(Self {
             ctx,
             cred,
             task: Task::current().group_leader().into(),
-            // SAFETY: `inner` is initialised in the call to `mutex_init` below.
-            inner: unsafe { Mutex::new(ProcessInner::new()) },
-            // SAFETY: `node_refs` is initialised in the call to `mutex_init` below.
-            node_refs: unsafe { Mutex::new(ProcessNodeRefs::new()) },
-        })?);
-
-        // SAFETY: `inner` is pinned when `Process` is.
-        let pinned = unsafe { process.as_mut().map_unchecked_mut(|p| &mut p.inner) };
-        kernel::mutex_init!(pinned, "Process::inner");
-
-        // SAFETY: `node_refs` is pinned when `Process` is.
-        let pinned = unsafe { process.as_mut().map_unchecked_mut(|p| &mut p.node_refs) };
-        kernel::mutex_init!(pinned, "Process::node_refs");
-
+            inner: kernel::mutex_new!("Process::inner", ProcessInner::new()),
+            node_refs: kernel::mutex_new!("Process:node_refs", ProcessNodeRefs::new()),
+        }))?;
         Ok(process.into())
     }
 

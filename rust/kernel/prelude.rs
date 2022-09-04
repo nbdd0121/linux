@@ -34,3 +34,5 @@ pub use super::static_assert;
 pub use super::{error::code::*, Error, Result};
 
 pub use super::{str::CStr, ARef, ThisModule};
+
+pub use super::pin::{init_pin, pin_init, PtrTryPinWith};

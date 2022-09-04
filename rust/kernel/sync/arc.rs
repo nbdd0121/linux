@@ -15,6 +15,7 @@
 //!
 //! [`Arc`]: https://doc.rust-lang.org/std/sync/struct.Arc.html
 
+use crate::pin::{Init, PinUninit};
 use crate::{bindings, error::code::*, Error, Opaque, Result};
 use alloc::{
     alloc::{alloc, dealloc},
@@ -469,6 +470,13 @@ impl<T> UniqueArc<T> {
             inner: Arc::try_new(MaybeUninit::uninit())?,
         })
     }
+
+    pub fn try_pin_with<I>(init: I) -> Result<Self>
+    where
+        I: Init<T, Error>,
+    {
+        Self::try_new_uninit()?.init(init)
+    }
 }
 
 impl<T> UniqueArc<MaybeUninit<T>> {
@@ -480,6 +488,23 @@ impl<T> UniqueArc<MaybeUninit<T>> {
             // SAFETY: The new `Arc` is taking over `ptr` from `self.inner` (which won't be
             // dropped). The types are compatible because `MaybeUninit<T>` is compatible with `T`.
             inner: unsafe { Arc::from_inner(inner.cast()) },
+        }
+    }
+
+    fn init<I>(self, init: I) -> Result<UniqueArc<T>>
+    where
+        I: Init<T, Error>,
+    {
+        let mut ptr = ManuallyDrop::new(self);
+        match init.__init(unsafe { PinUninit::new(&mut ptr) }) {
+            Ok(_) => Ok(UniqueArc {
+                inner: unsafe { Arc::from_inner(ptr.inner.ptr.cast()) },
+            }),
+            Err(err) => {
+                let err = err.into_inner();
+                drop(ManuallyDrop::into_inner(ptr));
+                Err(err)
+            }
         }
     }
 }

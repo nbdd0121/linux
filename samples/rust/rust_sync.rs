@@ -4,7 +4,7 @@
 
 use kernel::prelude::*;
 use kernel::{
-    condvar_init, mutex_init, spinlock_init,
+    condvar_init, mutex_new, spinlock_init,
     sync::{CondVar, Mutex, SpinLock},
 };
 
@@ -30,8 +30,7 @@ impl kernel::Module for RustSync {
         // Test mutexes.
         {
             // SAFETY: `init` is called below.
-            let mut data = Pin::from(Box::try_new(unsafe { Mutex::new(0) })?);
-            mutex_init!(data.as_mut(), "RustSync::init::data1");
+            let mut data = Box::try_pin_with(mutex_new!("RustSync::init::data1", 0))?;
             *data.lock() = 10;
             pr_info!("Value: {}\n", *data.lock());
 

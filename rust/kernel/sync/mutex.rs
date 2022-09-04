@@ -10,9 +10,17 @@ use core::{cell::UnsafeCell, marker::PhantomPinned, pin::Pin};
 
 /// Safely initialises a [`Mutex`] with the given name, generating a new lock class.
 #[macro_export]
-macro_rules! mutex_init {
-    ($mutex:expr, $name:literal) => {
-        $crate::init_with_lockdep!($mutex, $name)
+macro_rules! mutex_new {
+    ($name:literal, $val:expr) => {
+        kernel::pin::init_from_closure(|this| {
+            if false {
+                return Err(this.init_err($crate::error::code::EINVAL));
+            }
+            let val = $val;
+            let mut ok = this.init_with_value(unsafe { Mutex::new(val) });
+            $crate::init_with_lockdep!(ok.as_mut(), $name);
+            Ok(ok)
+        })
     };
 }
 
@@ -21,7 +29,7 @@ macro_rules! mutex_init {
 /// unlocked, at which point another thread will be allowed to wake up and make progress.
 ///
 /// A [`Mutex`] must first be initialised with a call to [`Mutex::init_lock`] before it can be
-/// used. The [`mutex_init`] macro is provided to automatically assign a new lock class to a mutex
+/// used. The [`mutex_new`] macro is provided to automatically assign a new lock class to a mutex
 /// instance.
 ///
 /// Since it may block, [`Mutex`] needs to be used with care in atomic contexts.

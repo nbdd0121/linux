@@ -5,8 +5,8 @@
 mod concat_idents;
 mod helpers;
 mod module;
-mod vtable;
 mod pin_init;
+mod vtable;
 
 use proc_macro::TokenStream;
 use syn::Error;

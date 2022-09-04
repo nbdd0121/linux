@@ -3,9 +3,11 @@
 //! Kernel support for executing futures in C workqueues (`struct workqueue_struct`).
 
 use super::{ArcWake, AutoStopHandle};
+use crate as kernel;
+use crate::pin::{init_pin, pin_init};
 use crate::{
     error::code::*,
-    mutex_init,
+    mutex_new,
     revocable::AsyncRevocable,
     sync::{Arc, ArcBorrow, LockClassKey, Mutex, UniqueArc},
     unsafe_list,
@@ -191,9 +193,12 @@ struct ExecutorInner {
 ///
 /// # example_shared_workqueue().unwrap();
 /// ```
+#[pin_init]
 pub struct Executor {
     queue: Either<BoxedQueue, &'static Queue>,
+    #[pin]
     inner: Mutex<ExecutorInner>,
+    #[pin]
     _pin: PhantomPinned,
 }
 
@@ -220,20 +225,17 @@ impl Executor {
     ///
     /// It uses the given work queue to run its tasks.
     fn new_internal(queue: Either<BoxedQueue, &'static Queue>) -> Result<AutoStopHandle<Self>> {
-        let mut e = Pin::from(UniqueArc::try_new(Self {
+        let mut e = UniqueArc::try_pin_with(init_pin!(Self {
             queue,
             _pin: PhantomPinned,
-            // SAFETY: `mutex_init` is called below.
-            inner: unsafe {
-                Mutex::new(ExecutorInner {
+            inner: mutex_new!(
+                "Executor::inner",
+                ExecutorInner {
                     stopped: false,
                     tasks: unsafe_list::List::new(),
-                })
-            },
-        })?);
-        // SAFETY: `tasks` is pinned when the executor is.
-        let pinned = unsafe { e.as_mut().map_unchecked_mut(|e| &mut e.inner) };
-        mutex_init!(pinned, "Executor::inner");
+                }
+            ),
+        }))?;
 
         Ok(AutoStopHandle::new(e.into()))
     }

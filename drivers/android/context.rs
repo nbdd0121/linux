@@ -17,7 +17,9 @@ struct Manager {
     uid: Option<bindings::kuid_t>,
 }
 
+#[pin_init]
 pub(crate) struct Context {
+    #[pin]
     manager: Mutex<Manager>,
 }
 
@@ -27,19 +29,16 @@ unsafe impl Sync for Context {}
 
 impl Context {
     pub(crate) fn new() -> Result<Arc<Self>> {
-        let mut ctx = Pin::from(UniqueArc::try_new(Self {
+        let mut ctx = UniqueArc::try_pin_with(init_pin!(Self {
             // SAFETY: Init is called below.
-            manager: unsafe {
-                Mutex::new(Manager {
+            manager: mutex_new!(
+                "Context::manager",
+                Manager {
                     node: None,
                     uid: None,
-                })
-            },
-        })?);
-
-        // SAFETY: `manager` is also pinned when `ctx` is.
-        let manager = unsafe { ctx.as_mut().map_unchecked_mut(|c| &mut c.manager) };
-        kernel::mutex_init!(manager, "Context::manager");
+                }
+            ),
+        }))?;
 
         Ok(ctx.into())
     }
