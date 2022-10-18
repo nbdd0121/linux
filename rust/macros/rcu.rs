@@ -1,20 +1,12 @@
-use proc_macro2::{Literal, Span, TokenStream};
-use quote::{quote_spanned, ToTokens};
+use super::field::field_name_hash;
+use proc_macro2::{Span, TokenStream};
+use quote::{format_ident, quote, quote_spanned, ToTokens};
 use syn::{
     punctuated::Punctuated, Data, DeriveInput, Error, Fields, GenericParam, Generics, Member,
     Result,
 };
 
-pub(crate) fn field_name_hash(name: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325;
-    for b in name.bytes() {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-pub(crate) fn field(input: TokenStream) -> Result<TokenStream> {
+pub(crate) fn rcu_field(input: TokenStream) -> Result<TokenStream> {
     let DeriveInput {
         ident,
         generics,
@@ -44,6 +36,22 @@ pub(crate) fn field(input: TokenStream) -> Result<TokenStream> {
         Fields::Unnamed(v) => v.unnamed,
         Fields::Unit => Punctuated::new(),
     };
+
+    // Check if the field is `Rcu<...>`
+    let is_rcu: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let path = match &field.ty {
+                syn::Type::Path(path) => path,
+                _ => return false,
+            };
+            let segment = match path.path.segments.last() {
+                Some(v) => v,
+                _ => return false,
+            };
+            segment.ident == "Rcu"
+        })
+        .collect();
 
     let field_name: Vec<_> = fields
         .iter()
@@ -83,6 +91,7 @@ pub(crate) fn field(input: TokenStream) -> Result<TokenStream> {
         .collect();
 
     let mixed_site = Span::mixed_site();
+
     let mut builder = Vec::new();
 
     for i in 0..field_name.len() {
@@ -93,30 +102,36 @@ pub(crate) fn field(input: TokenStream) -> Result<TokenStream> {
         };
         let ty = &fields[i].ty;
         let field_name_hash = field_name_hash(&field_name_str);
-        let field_name_literal = Literal::string(&field_name_str);
+
+        let wrapper_ty = if is_rcu[i] {
+            quote_spanned!(mixed_site => &'__field_projection __FieldProjection)
+        } else {
+            quote_spanned!(mixed_site => &'__field_projection mut __FieldProjection)
+        };
 
         builder.push(quote_spanned! {mixed_site =>
             unsafe impl<
                 #(#generics,)*
-            > kernel::projection::Field<
+            > kernel::sync::rcu_mutex::RcuGuardField<
                 #ident<#(#ty_generics,)*>
             > for kernel::projection::FieldName<#field_name_hash> #where_clause
             {
-                type Type = #ty;
-                const NAME: &'static str = #field_name_literal;
-
-                unsafe fn map(ptr: *const #ident<#(#ty_generics,)*>) -> *const Self::Type {
-                    unsafe { core::ptr::addr_of!((*ptr).#field_name_current) }
-                }
+                type Wrapper<'__field_projection, __FieldProjection: ?Sized + '__field_projection> = #wrapper_ty;
             }
-        })
+        });
+
+        if is_rcu[i] {
+            builder.push(quote_spanned! {mixed_site =>
+                unsafe impl<
+                    #(#generics,)*
+                > kernel::sync::rcu_mutex::RcuField<
+                    #ident<#(#ty_generics,)*>
+                > for kernel::projection::FieldName<#field_name_hash> #where_clause
+                {}
+            });
+        }
     }
 
-    let gen = quote_spanned! {mixed_site =>
-        impl<#(#generics,)*> kernel::projection::HasField for #ident<#(#ty_generics,)*>
-            #where_clause
-        {}
-        #(#builder)*
-    };
+    let gen = quote!(#(#builder)*);
     Ok(gen)
 }

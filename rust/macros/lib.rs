@@ -4,6 +4,7 @@
 
 mod concat_idents;
 mod field;
+mod rcu;
 mod helpers;
 mod module;
 mod pin;
@@ -203,6 +204,13 @@ pub fn field(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(PinField, attributes(pin))]
 pub fn pin_field(input: TokenStream) -> TokenStream {
     pin::pin_field(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+#[proc_macro_derive(RcuField)]
+pub fn rcu_field(input: TokenStream) -> TokenStream {
+    rcu::rcu_field(input.into())
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }

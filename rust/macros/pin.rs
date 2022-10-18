@@ -111,7 +111,7 @@ pub(crate) fn pin_field(input: TokenStream) -> Result<TokenStream> {
                 #(#generics,)*
             > kernel::projection::PinField<
                 #ident<#(#ty_generics,)*>
-            > for FieldName<#field_name_hash> #where_clause
+            > for kernel::projection::FieldName<#field_name_hash> #where_clause
             {
                 type PinWrapper<'__field_projection, __FieldProjection: ?Sized + '__field_projection> = #wrapper_ty;
                 type PinMaybeUninitWrapper<'__field_projection, __FieldProjection: '__field_projection> = #wrapper_maybe_uninit_ty;

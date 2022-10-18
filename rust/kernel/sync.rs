@@ -35,6 +35,7 @@ mod revocable;
 mod rwsem;
 mod seqlock;
 pub mod smutex;
+pub mod rcu_mutex;
 mod spinlock;
 
 pub use arc::{new_refcount, Arc, ArcBorrow, StaticArc, UniqueArc};
