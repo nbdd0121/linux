@@ -3,11 +3,14 @@
 //! Crate for all kernel procedural macros.
 
 mod concat_idents;
+mod field;
 mod helpers;
 mod module;
+mod pin;
 mod vtable;
 
 use proc_macro::TokenStream;
+use syn::Error;
 
 /// Declares a kernel module.
 ///
@@ -188,4 +191,18 @@ pub fn vtable(attr: TokenStream, ts: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn concat_idents(ts: TokenStream) -> TokenStream {
     concat_idents::concat_idents(ts)
+}
+
+#[proc_macro_derive(Field)]
+pub fn field(input: TokenStream) -> TokenStream {
+    field::field(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+#[proc_macro_derive(PinField, attributes(pin))]
+pub fn pin_field(input: TokenStream) -> TokenStream {
+    pin::pin_field(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }

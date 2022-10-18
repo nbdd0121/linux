@@ -28,6 +28,7 @@
 #![feature(ptr_metadata)]
 #![feature(receiver_trait)]
 #![feature(unsize)]
+#![feature(ptr_const_cast)]
 
 // Ensure conditional compilation based on the kernel configuration works;
 // otherwise we may silently break things like initcall handling.
@@ -103,6 +104,8 @@ pub mod user_ptr;
 
 #[cfg(CONFIG_KUNIT)]
 pub mod kunit;
+
+pub mod projection;
 
 #[doc(hidden)]
 pub use build_error::build_error;
