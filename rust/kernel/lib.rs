@@ -27,7 +27,6 @@
 #[cfg(not(CONFIG_RUST))]
 compile_error!("Missing kernel configuration for conditional compilation");
 
-#[allow(unused_extern_crates)]
 // allow proc-macros to refer to `::kernel` inside the kernel crate.
 extern crate self as kernel;
 
