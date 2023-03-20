@@ -7,9 +7,7 @@
 //! C header: [`include/linux/platform_device.h`](../../../../include/linux/platform_device.h)
 
 use crate::{
-    bindings,
-    device::{self, RawDevice},
-    driver,
+    bindings, device, driver,
     error::{from_kernel_result, Result},
     of,
     str::CStr,
@@ -66,7 +64,9 @@ impl<T: Driver> Adapter<T> {
 
         // SAFETY: `table` has static lifetime, so it is valid for read. `dev` is guaranteed to be
         // valid while it's alive, so is the raw device returned by it.
-        let id = unsafe { bindings::of_match_device(table.as_ref(), dev.raw_device()) };
+        let id = unsafe {
+            bindings::of_match_device(table.as_ref(), device::Device::as_raw(dev.as_ref()))
+        };
         if id.is_null() {
             return None;
         }
@@ -185,11 +185,10 @@ impl Device {
     }
 }
 
-// SAFETY: The device returned by `raw_device` is the raw platform device.
-unsafe impl device::RawDevice for Device {
-    fn raw_device(&self) -> *mut bindings::device {
+impl AsRef<device::Device> for Device {
+    fn as_ref(&self) -> &device::Device {
         // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
-        unsafe { &mut (*self.ptr).dev }
+        unsafe { device::Device::from_raw(&mut (*self.ptr).dev) }
     }
 }
 

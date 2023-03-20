@@ -6,7 +6,7 @@
 
 use crate::{
     bindings, device, error::code::*, error::from_kernel_result, sync::LockClassKey,
-    types::ForeignOwnable, Error, Result,
+    types::ForeignOwnable, ARef, Error, Result,
 };
 use core::{
     cell::UnsafeCell,
@@ -80,7 +80,7 @@ pub trait Chip {
 /// ```
 /// # use kernel::prelude::*;
 /// use kernel::{
-///     device::RawDevice,
+///     device::Device,
 ///     gpio::{self, Registration},
 /// };
 ///
@@ -90,7 +90,7 @@ pub trait Chip {
 ///     type Data = ();
 /// }
 ///
-/// fn example(parent: &dyn RawDevice) -> Result<Pin<Box<Registration<MyGpioChip>>>> {
+/// fn example(parent: &Device) -> Result<Pin<Box<Registration<MyGpioChip>>>> {
 ///     let mut r = Pin::from(Box::try_new(Registration::new())?);
 ///     kernel::gpio_chip_register!(r.as_mut(), 32, None, parent, ())?;
 ///     Ok(r)
@@ -98,7 +98,7 @@ pub trait Chip {
 /// ```
 pub struct Registration<T: Chip> {
     gc: UnsafeCell<bindings::gpio_chip>,
-    parent: Option<device::Device>,
+    parent: Option<ARef<device::Device>>,
     _p: PhantomData<T>,
     _pin: PhantomPinned,
 }
@@ -126,7 +126,7 @@ impl<T: Chip> Registration<T> {
         self: Pin<&mut Self>,
         gpio_count: u16,
         base: Option<i32>,
-        parent: &dyn device::RawDevice,
+        parent: &device::Device,
         data: T::Data,
         lock_keys: [&'static LockClassKey; 2],
     ) -> Result {
@@ -167,7 +167,7 @@ impl<T: Chip> Registration<T> {
             }
 
             gc.ngpio = gpio_count;
-            gc.parent = parent.raw_device();
+            gc.parent = parent.as_raw();
             gc.label = parent.name().as_char_ptr();
 
             // TODO: Define `gc.owner` as well.
@@ -189,7 +189,7 @@ impl<T: Chip> Registration<T> {
             return Err(Error::from_kernel_errno(ret));
         }
 
-        this.parent = Some(device::Device::from_dev(parent));
+        this.parent = Some(parent.into());
         Ok(())
     }
 }
@@ -350,7 +350,7 @@ mod irqchip {
             mut self: Pin<&mut Self>,
             gpio_count: u16,
             base: Option<i32>,
-            parent: &dyn device::RawDevice,
+            parent: &device::Device,
             data: T::Data,
             parent_irq: u32,
             lock_keys: [&'static LockClassKey; 2],

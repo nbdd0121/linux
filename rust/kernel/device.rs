@@ -12,7 +12,7 @@ use crate::{
     revocable::{Revocable, RevocableGuard},
     str::CStr,
     sync::{LockClassKey, NeedsLockClass, RevocableMutex, RevocableMutexGuard, UniqueArc},
-    Result,
+    AlwaysRefCounted, Opaque, Result,
 };
 use core::{
     fmt,
@@ -37,10 +37,50 @@ use crate::c_str;
 pub unsafe trait RawDevice {
     /// Returns the raw `struct device` related to `self`.
     fn raw_device(&self) -> *mut bindings::device;
+}
+
+/// Wraps the kernel's `struct device`.
+pub struct Device(Opaque<bindings::device>);
+
+// SAFETY: `Device` wraps `struct device` which is only ever created by C code.
+unsafe impl Send for Device {}
+
+// SAFETY: shared pointers to `struct device` is safe to use from any thread.
+unsafe impl Sync for Device {}
+
+// SAFETY: Instances of `Device` are always refcounted.
+unsafe impl AlwaysRefCounted for Device {
+    fn inc_ref(&self) {
+        // SAFETY: The existence of a shared reference means that the refcount is nonzero.
+        unsafe { bindings::get_device(self.0.get()) };
+    }
+
+    unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
+        // SAFETY: The safety requirements guarantee that the refcount is nonzero.
+        unsafe { bindings::put_device(obj.cast().as_ptr()) };
+    }
+}
+
+impl Device {
+    /// Obtain the raw `struct device *` from a `&Device`.
+    pub fn as_raw(&self) -> *mut bindings::device {
+        self.0.get()
+    }
+
+    /// Convert a raw `struct device` pointer to a `&Device`.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `ptr` is valid, non-null, and has a non-zero reference count for
+    /// the entire duration when the returned reference exists.
+    pub unsafe fn from_raw<'a>(ptr: *mut bindings::device) -> &'a Self {
+        // SAFETY: Guaranteed by the safety requirements of the function.
+        unsafe { &*ptr.cast() }
+    }
 
     /// Returns the name of the device.
-    fn name(&self) -> &CStr {
-        let ptr = self.raw_device();
+    pub fn name(&self) -> &CStr {
+        let ptr = self.as_raw();
 
         // SAFETY: `ptr` is valid because `self` keeps it alive.
         let name = unsafe { bindings::dev_name(ptr) };
@@ -56,7 +96,7 @@ pub unsafe trait RawDevice {
     ///
     /// Returns a managed reference to the clock producer.
     #[cfg(CONFIG_COMMON_CLK)]
-    fn clk_get(&self, id: Option<&CStr>) -> Result<Clk> {
+    pub fn clk_get(&self, id: Option<&CStr>) -> Result<Clk> {
         let id_ptr = match id {
             Some(cstr) => cstr.as_char_ptr(),
             None => core::ptr::null(),
@@ -64,7 +104,7 @@ pub unsafe trait RawDevice {
 
         // SAFETY: `id_ptr` is optional and may be either a valid pointer
         // from the type invariant or NULL otherwise.
-        let clk_ptr = unsafe { from_kernel_err_ptr(bindings::clk_get(self.raw_device(), id_ptr)) }?;
+        let clk_ptr = unsafe { from_kernel_err_ptr(bindings::clk_get(self.as_raw(), id_ptr)) }?;
 
         // SAFETY: Clock is initialized with valid pointer returned from `bindings::clk_get` call.
         unsafe { Ok(Clk::new(clk_ptr)) }
@@ -75,7 +115,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_emerg`].
     ///
     /// [`dev_emerg`]: crate::dev_emerg
-    fn pr_emerg(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_emerg(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_EMERG, args) };
     }
@@ -85,7 +125,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_alert`].
     ///
     /// [`dev_alert`]: crate::dev_alert
-    fn pr_alert(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_alert(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_ALERT, args) };
     }
@@ -95,7 +135,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_crit`].
     ///
     /// [`dev_crit`]: crate::dev_crit
-    fn pr_crit(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_crit(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_CRIT, args) };
     }
@@ -105,7 +145,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_err`].
     ///
     /// [`dev_err`]: crate::dev_err
-    fn pr_err(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_err(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_ERR, args) };
     }
@@ -115,7 +155,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_warn`].
     ///
     /// [`dev_warn`]: crate::dev_warn
-    fn pr_warn(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_warn(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_WARNING, args) };
     }
@@ -125,7 +165,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_notice`].
     ///
     /// [`dev_notice`]: crate::dev_notice
-    fn pr_notice(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_notice(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_NOTICE, args) };
     }
@@ -135,7 +175,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_info`].
     ///
     /// [`dev_info`]: crate::dev_info
-    fn pr_info(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_info(&self, args: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
         unsafe { self.printk(bindings::KERN_INFO, args) };
     }
@@ -145,7 +185,7 @@ pub unsafe trait RawDevice {
     /// More details are available from [`dev_dbg`].
     ///
     /// [`dev_dbg`]: crate::dev_dbg
-    fn pr_dbg(&self, args: fmt::Arguments<'_>) {
+    pub fn pr_dbg(&self, args: fmt::Arguments<'_>) {
         if cfg!(debug_assertions) {
             // SAFETY: `klevel` is null-terminated, uses one of the kernel constants.
             unsafe { self.printk(bindings::KERN_DEBUG, args) };
@@ -159,7 +199,7 @@ pub unsafe trait RawDevice {
     /// Callers must ensure that `klevel` is null-terminated; in particular, one of the
     /// `KERN_*`constants, for example, `KERN_CRIT`, `KERN_ALERT`, etc.
     #[cfg_attr(not(CONFIG_PRINTK), allow(unused_variables))]
-    unsafe fn printk(&self, klevel: &[u8], msg: fmt::Arguments<'_>) {
+    pub unsafe fn printk(&self, klevel: &[u8], msg: fmt::Arguments<'_>) {
         // SAFETY: `klevel` is null-terminated and one of the kernel constants. `self.raw_device`
         // is valid because `self` is valid. The "%pA" format string expects a pointer to
         // `fmt::Arguments`, which is what we're passing as the last argument.
@@ -167,65 +207,11 @@ pub unsafe trait RawDevice {
         unsafe {
             bindings::_dev_printk(
                 klevel as *const _ as *const core::ffi::c_char,
-                self.raw_device(),
+                self.as_raw(),
                 c_str!("%pA").as_char_ptr(),
                 &msg as *const _ as *const core::ffi::c_void,
             )
         };
-    }
-}
-
-/// A ref-counted device.
-///
-/// # Invariants
-///
-/// `ptr` is valid, non-null, and has a non-zero reference count. One of the references is owned by
-/// `self`, and will be decremented when `self` is dropped.
-pub struct Device {
-    pub(crate) ptr: *mut bindings::device,
-}
-
-// SAFETY: `Device` only holds a pointer to a C device, which is safe to be used from any thread.
-unsafe impl Send for Device {}
-
-// SAFETY: `Device` only holds a pointer to a C device, references to which are safe to be used
-// from any thread.
-unsafe impl Sync for Device {}
-
-impl Device {
-    /// Creates a new device instance.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure that `ptr` is valid, non-null, and has a non-zero reference count.
-    pub unsafe fn new(ptr: *mut bindings::device) -> Self {
-        // SAFETY: By the safety requirements, ptr is valid and its refcounted will be incremented.
-        unsafe { bindings::get_device(ptr) };
-        // INVARIANT: The safety requirements satisfy all but one invariant, which is that `self`
-        // owns a reference. This is satisfied by the call to `get_device` above.
-        Self { ptr }
-    }
-
-    /// Creates a new device instance from an existing [`RawDevice`] instance.
-    pub fn from_dev(dev: &dyn RawDevice) -> Self {
-        // SAFETY: The requirements are satisfied by the existence of `RawDevice` and its safety
-        // requirements.
-        unsafe { Self::new(dev.raw_device()) }
-    }
-}
-
-// SAFETY: The device returned by `raw_device` is the one for which we hold a reference.
-unsafe impl RawDevice for Device {
-    fn raw_device(&self) -> *mut bindings::device {
-        self.ptr
-    }
-}
-
-impl Drop for Device {
-    fn drop(&mut self) {
-        // SAFETY: By the type invariants, we know that `self` owns a reference, so it is safe to
-        // relinquish it now.
-        unsafe { bindings::put_device(self.ptr) };
     }
 }
 
@@ -336,8 +322,7 @@ macro_rules! dev_printk {
         {
             // We have an explicity `use` statement here so that callers of this macro are not
             // required to explicitly use the `RawDevice` trait to use its functions.
-            use $crate::device::RawDevice;
-            ($dev).$method(core::format_args!($($f)*));
+            $crate::device::Device::$method($dev.as_ref(), ::core::format_args!($($f)*));
         }
     }
 }

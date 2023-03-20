@@ -19,10 +19,10 @@ use core::{fmt, mem::MaybeUninit, pin::Pin};
 /// # Examples
 ///
 /// ```
-/// # use kernel::{c_str, device::RawDevice, file, miscdev, prelude::*};
+/// # use kernel::{c_str, device::Device, file, miscdev, prelude::*};
 /// fn example(
 ///     reg: Pin<&mut miscdev::Registration<impl file::Operations<OpenData = ()>>>,
-///     parent: &dyn RawDevice,
+///     parent: &dyn AsRef<Device>,
 /// ) -> Result {
 ///     miscdev::Options::new()
 ///         .mode(0o600)
@@ -35,7 +35,7 @@ use core::{fmt, mem::MaybeUninit, pin::Pin};
 pub struct Options<'a> {
     minor: Option<i32>,
     mode: Option<u16>,
-    parent: Option<&'a dyn device::RawDevice>,
+    parent: Option<&'a dyn AsRef<device::Device>>,
 }
 
 impl<'a> Options<'a> {
@@ -64,7 +64,7 @@ impl<'a> Options<'a> {
     }
 
     /// Sets the device parent.
-    pub const fn parent(&mut self, p: &'a dyn device::RawDevice) -> &mut Self {
+    pub const fn parent(&mut self, p: &'a dyn AsRef<device::Device>) -> &mut Self {
         self.parent = Some(p);
         self
     }
@@ -169,7 +169,7 @@ impl<T: file::Operations> Registration<T> {
         this.mdev.mode = opts.mode.unwrap_or(0);
         this.mdev.parent = opts
             .parent
-            .map_or(core::ptr::null_mut(), |p| p.raw_device());
+            .map_or(core::ptr::null_mut(), |p| p.as_ref().as_raw());
 
         // We write to `open_data` here because as soon as `misc_register` succeeds, the file can be
         // opened, so we need `open_data` configured ahead of time.
