@@ -6,6 +6,7 @@
 
 use super::IrqSaveBackend;
 use crate::bindings;
+use crate::types::Opaque;
 
 /// Creates a [`SpinLock`] initialiser with the given name and a newly-created lock class.
 ///
@@ -94,51 +95,68 @@ macro_rules! new_spinlock {
 pub type SpinLock<T> = super::Lock<T, SpinLockBackend>;
 
 /// A kernel `spinlock_t` lock backend.
-pub struct SpinLockBackend;
+pub struct SpinLockBackend(Opaque<bindings::spinlock_t>);
+
+pub struct SpinLockIrqSaveBackend;
 
 // SAFETY: The underlying kernel `spinlock_t` object ensures mutual exclusion. `relock` uses the
 // same scheme as `unlock` to figure out which locking method was used originally.
 unsafe impl super::Backend for SpinLockBackend {
-    type State = bindings::spinlock_t;
-    type GuardState = Option<core::ffi::c_ulong>;
+    type GuardState = ();
 
     unsafe fn init(
-        ptr: *mut Self::State,
+        ptr: *mut Self,
         name: *const core::ffi::c_char,
         key: *mut bindings::lock_class_key,
     ) {
         // SAFETY: The safety requirements ensure that `ptr` is valid for writes, and `name` and
         // `key` are valid for read indefinitely.
-        unsafe { bindings::__spin_lock_init(ptr, name, key) }
-    }
-
-    unsafe fn lock(ptr: *mut Self::State) -> Self::GuardState {
-        // SAFETY: The safety requirements of this function ensure that `ptr` points to valid
-        // memory, and that it has been initialised before.
-        unsafe { bindings::spin_lock(ptr) };
-        None
-    }
-
-    unsafe fn unlock(ptr: *mut Self::State, guard_state: &Self::GuardState) {
-        match guard_state {
-            // SAFETY: The safety requirements of this function ensure that `ptr` is valid and that
-            // the caller is the owner of the mutex.
-            Some(flags) => unsafe { bindings::spin_unlock_irqrestore(ptr, *flags) },
-            // SAFETY: The safety requirements of this function ensure that `ptr` is valid and that
-            // the caller is the owner of the mutex.
-            None => unsafe { bindings::spin_unlock(ptr) },
+        unsafe {
+            bindings::__spin_lock_init(
+                Opaque::raw_get(core::ptr::addr_of_mut!((*ptr).0)),
+                name,
+                key,
+            )
         }
     }
 
-    unsafe fn relock(ptr: *mut Self::State, guard_state: &mut Self::GuardState) {
-        let _ = match guard_state {
-            // SAFETY: The safety requiments of this function ensure that `ptr` has been
-            // initialised.
-            None => unsafe { Self::lock(ptr) },
-            // SAFETY: The safety requiments of this function ensure that `ptr` has been
-            // initialised.
-            Some(_) => unsafe { Self::lock_irqsave(ptr) },
-        };
+    fn lock(state: &Self) -> Self::GuardState {
+        // SAFETY: The safety requirements of this function ensure that `ptr` points to valid
+        // memory, and that it has been initialised before.
+        unsafe { bindings::spin_lock(state.0.get()) };
+        ()
+    }
+
+    unsafe fn unlock(state: &Self, _: &Self::GuardState) {
+        // SAFETY: The safety requirements of this function ensure that `ptr` is valid and that
+        // the caller is the owner of the mutex.
+        unsafe { bindings::spin_unlock(state.0.get()) }
+    }
+}
+
+unsafe impl super::Backend<SpinLockBackend> for SpinLockIrqSaveBackend {
+    type GuardState = core::ffi::c_ulong;
+
+    // This function has an unsatisfised bound and thus can never be called.
+    // But Rust currently still require us to provide an implementation.
+    unsafe fn init(_: *mut Self, _: *const core::ffi::c_char, _: *mut bindings::lock_class_key) {
+        crate::build_error!("function found is unsatisfisable");
+    }
+
+    fn lock(state: &SpinLockBackend) -> Self::GuardState {
+        // SAFETY: The safety requirements of this function ensure that `ptr` points to valid
+        // memory, and that it has been initialised before.
+        unsafe { bindings::spin_lock_irqsave(state.0.get()) }
+    }
+
+    unsafe fn unlock(state: &SpinLockBackend, guard_state: &Self::GuardState) {
+        // SAFETY: The safety requirements of this function ensure that `ptr` is valid and that
+        // the caller is the owner of the mutex.
+        unsafe { bindings::spin_unlock_irqrestore(state.0.get(), *guard_state) }
+    }
+
+    unsafe fn relock(state: &SpinLockBackend, _guard_state: &mut Self::GuardState) {
+        _ = Self::lock(state);
     }
 }
 
@@ -147,9 +165,5 @@ unsafe impl super::Backend for SpinLockBackend {
 // interrupt state, and the `irqrestore` variant of the lock release functions to restore the state
 // in `unlock` -- we use the guard context to determine which method was used to acquire the lock.
 unsafe impl IrqSaveBackend for SpinLockBackend {
-    unsafe fn lock_irqsave(ptr: *mut Self::State) -> Self::GuardState {
-        // SAFETY: The safety requirements of this function ensure that `ptr` points to valid
-        // memory, and that it has been initialised before.
-        Some(unsafe { bindings::spin_lock_irqsave(ptr) })
-    }
+    type IrqSaveBackend = SpinLockIrqSaveBackend;
 }

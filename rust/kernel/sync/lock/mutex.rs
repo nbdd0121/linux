@@ -5,6 +5,7 @@
 //! This module allows Rust code to use the kernel's `struct mutex`.
 
 use crate::bindings;
+use crate::types::Opaque;
 
 /// Creates a [`Mutex`] initialiser with the given name and a newly-created lock class.
 ///
@@ -87,32 +88,31 @@ macro_rules! new_mutex {
 pub type Mutex<T> = super::Lock<T, MutexBackend>;
 
 /// A kernel `struct mutex` lock backend.
-pub struct MutexBackend;
+pub struct MutexBackend(Opaque<bindings::mutex>);
 
 // SAFETY: The underlying kernel `struct mutex` object ensures mutual exclusion.
 unsafe impl super::Backend for MutexBackend {
-    type State = bindings::mutex;
     type GuardState = ();
 
     unsafe fn init(
-        ptr: *mut Self::State,
+        ptr: *mut Self,
         name: *const core::ffi::c_char,
         key: *mut bindings::lock_class_key,
     ) {
         // SAFETY: The safety requirements ensure that `ptr` is valid for writes, and `name` and
         // `key` are valid for read indefinitely.
-        unsafe { bindings::__mutex_init(ptr, name, key) }
+        unsafe { bindings::__mutex_init(Opaque::raw_get(core::ptr::addr_of_mut!((*ptr).0)), name, key) }
     }
 
-    unsafe fn lock(ptr: *mut Self::State) -> Self::GuardState {
+    fn lock(state: &Self) -> Self::GuardState {
         // SAFETY: The safety requirements of this function ensure that `ptr` points to valid
         // memory, and that it has been initialised before.
-        unsafe { bindings::mutex_lock(ptr) };
+        unsafe { bindings::mutex_lock(state.0.get()) };
     }
 
-    unsafe fn unlock(ptr: *mut Self::State, _guard_state: &Self::GuardState) {
+    unsafe fn unlock(state: &Self, _guard_state: &Self::GuardState) {
         // SAFETY: The safety requirements of this function ensure that `ptr` is valid and that the
         // caller is the owner of the mutex.
-        unsafe { bindings::mutex_unlock(ptr) };
+        unsafe { bindings::mutex_unlock(state.0.get()) };
     }
 }

@@ -6,7 +6,7 @@
 //! spinlocks, raw spinlocks) to be provided with minimal effort.
 
 use super::LockClassKey;
-use crate::{bindings, init::PinInit, pin_init, str::CStr, types::Opaque, types::ScopeGuard};
+use crate::{bindings, init::PinInit, pin_init, str::CStr, types::ScopeGuard};
 use core::{cell::UnsafeCell, marker::PhantomData, marker::PhantomPinned};
 use macros::pin_data;
 
@@ -25,10 +25,7 @@ pub mod spinlock;
 /// - Implementers must also ensure that `relock` uses the same locking method as the original
 /// lock operation. For example, it should disable interrupts if [`IrqSaveBackend::lock_irqsave`]
 /// is used.
-pub unsafe trait Backend {
-    /// The state required by the lock.
-    type State;
-
+pub unsafe trait Backend<State = Self>: Sized {
     /// The state required to be kept between lock and unlock.
     type GuardState;
 
@@ -39,25 +36,21 @@ pub unsafe trait Backend {
     /// `ptr` must be valid for write for the duration of the call, while `name` and `key` must
     /// remain valid for read indefinitely.
     unsafe fn init(
-        ptr: *mut Self::State,
+        ptr: *mut Self,
         name: *const core::ffi::c_char,
         key: *mut bindings::lock_class_key,
-    );
+    ) where Self: Backend;
 
     /// Acquires the lock, making the caller its owner.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure that [`Backend::init`] has been previously called.
     #[must_use]
-    unsafe fn lock(ptr: *mut Self::State) -> Self::GuardState;
+    fn lock(ptr: &State) -> Self::GuardState;
 
     /// Releases the lock, giving up its ownership.
     ///
     /// # Safety
     ///
     /// It must only be called by the current owner of the lock.
-    unsafe fn unlock(ptr: *mut Self::State, guard_state: &Self::GuardState);
+    unsafe fn unlock(ptr: &State, guard_state: &Self::GuardState);
 
     /// Reacquires the lock, making the caller its owner.
     ///
@@ -65,9 +58,9 @@ pub unsafe trait Backend {
     ///
     /// Callers must ensure that `guard_state` comes from a previous call to [`Backend::lock`] (or
     /// variant) that has been unlocked with [`Backend::unlock`] and will be relocked now.
-    unsafe fn relock(ptr: *mut Self::State, guard_state: &mut Self::GuardState) {
+    unsafe fn relock(ptr: &State, guard_state: &mut Self::GuardState) {
         // SAFETY: The safety requirements ensure that the lock is initialised.
-        *guard_state = unsafe { Self::lock(ptr) };
+        *guard_state = Self::lock(ptr);
     }
 }
 
@@ -82,16 +75,7 @@ pub unsafe trait Backend {
 /// must disable interrupts on lock, and restore interrupt state on unlock. Implementers may use
 /// [`Backend::GuardState`] to store state needed to keep track of the interrupt state.
 pub unsafe trait IrqSaveBackend: Backend {
-    /// Acquires the lock, making the caller its owner.
-    ///
-    /// Before acquiring the lock, it disables interrupts, and returns the previous interrupt state
-    /// as its guard state so that the guard can restore it when it is dropped.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure that [`Backend::init`] has been previously called.
-    #[must_use]
-    unsafe fn lock_irqsave(ptr: *mut Self::State) -> Self::GuardState;
+    type IrqSaveBackend: Backend<Self>;
 }
 
 /// A mutual exclusion primitive.
@@ -102,7 +86,7 @@ pub unsafe trait IrqSaveBackend: Backend {
 pub struct Lock<T: ?Sized, B: Backend> {
     /// The kernel lock object.
     #[pin]
-    state: Opaque<B::State>,
+    state: B,
 
     /// Some locks are known to be self-referential (e.g., mutexes), while others are architecture
     /// or config defined (e.g., spinlocks). So we conservatively require them to be pinned in case
@@ -130,9 +114,10 @@ impl<T, B: Backend> Lock<T, B> {
             _pin: PhantomPinned,
             // SAFETY: `slot` is valid while the closure is called and both `name` and `key` have
             // static lifetimes so they live indefinitely.
-            state <- Opaque::ffi_init(|slot| unsafe {
-                B::init(slot, name.as_char_ptr(), key.as_ptr())
-            }),
+            state <- unsafe { crate::init::init_from_closure::<_, core::convert::Infallible>(|slot| {
+                B::init(slot, name.as_char_ptr(), key.as_ptr());
+                Ok(())
+            })},
         })
     }
 }
@@ -142,7 +127,7 @@ impl<T: ?Sized, B: Backend> Lock<T, B> {
     pub fn lock(&self) -> Guard<'_, T, B> {
         // SAFETY: The constructor of the type calls `init`, so the existence of the object proves
         // that `init` was called.
-        let state = unsafe { B::lock(self.state.get()) };
+        let state = B::lock(&self.state);
         // SAFETY: The lock was just acquired.
         unsafe { Guard::new(self, state) }
     }
@@ -154,10 +139,10 @@ impl<T: ?Sized, B: IrqSaveBackend> Lock<T, B> {
     /// Before acquiring the lock, it disables interrupts. When the guard is dropped, the interrupt
     /// state (either enabled or disabled) is restored to its state before
     /// [`lock_irqsave`](Self::lock_irqsave) was called.
-    pub fn lock_irqsave(&self) -> Guard<'_, T, B> {
+    pub fn lock_irqsave(&self) -> Guard<'_, T, B, B::IrqSaveBackend> {
         // SAFETY: The constructor of the type calls `init`, so the existence of the object proves
         // that `init` was called.
-        let state = unsafe { B::lock_irqsave(self.state.get()) };
+        let state = B::IrqSaveBackend::lock(&self.state);
         // SAFETY: The lock was just acquired.
         unsafe { Guard::new(self, state) }
     }
@@ -169,29 +154,29 @@ impl<T: ?Sized, B: IrqSaveBackend> Lock<T, B> {
 /// when a guard goes out of scope. It also provides a safe and convenient way to access the data
 /// protected by the lock.
 #[must_use = "the lock unlocks immediately when the guard is unused"]
-pub struct Guard<'a, T: ?Sized, B: Backend> {
+pub struct Guard<'a, T: ?Sized, B: Backend, E: Backend<B> = B> {
     pub(crate) lock: &'a Lock<T, B>,
-    pub(crate) state: B::GuardState,
+    pub(crate) state: E::GuardState,
     _not_send: PhantomData<*mut ()>,
 }
 
 // SAFETY: `Guard` is sync when the data protected by the lock is also sync.
-unsafe impl<T: Sync + ?Sized, B: Backend> Sync for Guard<'_, T, B> {}
+unsafe impl<T: Sync + ?Sized, B: Backend, E: Backend<B>> Sync for Guard<'_, T, B, E> {}
 
-impl<T: ?Sized, B: Backend> Guard<'_, T, B> {
+impl<T: ?Sized, B: Backend, E: Backend<B>> Guard<'_, T, B, E> {
     pub(crate) fn do_unlocked(&mut self, cb: impl FnOnce()) {
         // SAFETY: The caller owns the lock, so it is safe to unlock it.
-        unsafe { B::unlock(self.lock.state.get(), &self.state) };
+        unsafe { E::unlock(&self.lock.state, &self.state) };
 
         // SAFETY: The lock was just unlocked above and is being relocked now.
         let _relock =
-            ScopeGuard::new(|| unsafe { B::relock(self.lock.state.get(), &mut self.state) });
+            ScopeGuard::new(|| unsafe { E::relock(&self.lock.state, &mut self.state) });
 
         cb();
     }
 }
 
-impl<T: ?Sized, B: Backend> core::ops::Deref for Guard<'_, T, B> {
+impl<T: ?Sized, B: Backend, E: Backend<B>> core::ops::Deref for Guard<'_, T, B, E> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -200,27 +185,27 @@ impl<T: ?Sized, B: Backend> core::ops::Deref for Guard<'_, T, B> {
     }
 }
 
-impl<T: ?Sized, B: Backend> core::ops::DerefMut for Guard<'_, T, B> {
+impl<T: ?Sized, B: Backend, E: Backend<B>> core::ops::DerefMut for Guard<'_, T, B, E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: The caller owns the lock, so it is safe to deref the protected data.
         unsafe { &mut *self.lock.data.get() }
     }
 }
 
-impl<T: ?Sized, B: Backend> Drop for Guard<'_, T, B> {
+impl<T: ?Sized, B: Backend, E: Backend<B>> Drop for Guard<'_, T, B, E> {
     fn drop(&mut self) {
         // SAFETY: The caller owns the lock, so it is safe to unlock it.
-        unsafe { B::unlock(self.lock.state.get(), &self.state) };
+        unsafe { E::unlock(&self.lock.state, &self.state) };
     }
 }
 
-impl<'a, T: ?Sized, B: Backend> Guard<'a, T, B> {
+impl<'a, T: ?Sized, B: Backend, E: Backend<B>> Guard<'a, T, B, E> {
     /// Constructs a new immutable lock guard.
     ///
     /// # Safety
     ///
     /// The caller must ensure that it owns the lock.
-    pub(crate) unsafe fn new(lock: &'a Lock<T, B>, state: B::GuardState) -> Self {
+    pub(crate) unsafe fn new(lock: &'a Lock<T, B>, state: E::GuardState) -> Self {
         Self {
             lock,
             state,
