@@ -210,6 +210,50 @@ impl<T: ?Sized> Arc<T> {
         }
     }
 
+    /// Convert the Arc into a raw pointer.
+    ///
+    /// The raw pointer has ownership of the refcount that this Arc object owned.
+    pub fn into_raw(self) -> *const T {
+        let ptr = self.ptr.as_ptr();
+        core::mem::forget(self);
+        // SAFETY: The pointer is valid.
+        unsafe { core::ptr::addr_of!((*ptr).data) }
+    }
+
+    /// Recreates a [`Arc`] instance previously deconstructed via [`Arc::into_raw`].
+    ///
+    /// This code relies on the `repr(C)` layout of structs as described in
+    /// <https://doc.rust-lang.org/reference/type-layout.html#reprc-structs>.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by a previous call to [`Arc::into_raw`]. Additionally, it
+    /// can only be called once for each previous call to [`Arc::into_raw`].
+    pub unsafe fn from_raw(ptr: *const T) -> Self {
+        // SAFETY: The safety requirement ensures that the pointer is valid.
+        let val_align = core::mem::align_of_val(unsafe { &*ptr });
+        let refcount_size = core::mem::size_of::<Opaque<bindings::refcount_t>>();
+
+        // Use the repr(C) algorithm to compute the offset of `data` in `ArcInner`.
+        //
+        // Pseudo-code for the `#[repr(C)]` algorithm can be found here:
+        // <https://doc.rust-lang.org/reference/type-layout.html#reprc-structs>
+        let mut val_offset = refcount_size;
+        let val_misalign = val_offset % val_align;
+        if val_misalign > 0 {
+            val_offset += val_align - val_misalign;
+        }
+
+        // This preserves the metadata in the pointer, if any.
+        let metadata = core::ptr::metadata(ptr as *const ArcInner<T>);
+        let ptr = (ptr as *mut u8).wrapping_sub(val_offset) as *mut ();
+        let ptr = core::ptr::from_raw_parts_mut(ptr, metadata);
+
+        // SAFETY: By the safety requirements we know that `ptr` came from `Arc::into_raw`, so the
+        // reference count held then will be owned by the new `Arc` object.
+        unsafe { Self::from_inner(NonNull::new_unchecked(ptr)) }
+    }
+
     /// Returns an [`ArcBorrow`] from the given [`Arc`].
     ///
     /// This is useful when the argument of a function call is an [`ArcBorrow`] (e.g., in a method
