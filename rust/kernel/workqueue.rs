@@ -4,7 +4,8 @@
 //!
 //! C header: [`include/linux/workqueue.h`](../../../../include/linux/workqueue.h)
 
-use crate::{bindings, types::Opaque};
+use crate::{bindings, prelude::*, types::Opaque};
+use core::marker::{PhantomData, PhantomPinned};
 
 /// A kernel work queue.
 ///
@@ -96,6 +97,164 @@ pub unsafe trait WorkItem {
     unsafe fn __enqueue<F>(self, queue_work_on: F) -> Self::EnqueueOutput
     where
         F: FnOnce(*mut bindings::work_struct) -> bool;
+}
+
+/// Defines the method that should be called when a work item is executed.
+///
+/// This trait is used when the `work_struct` field is defined using the `Work` helper.
+///
+/// # Safety
+///
+/// Implementers must ensure that `__enqueue` uses a `work_struct` initialized with the `run`
+/// method of this trait as the function pointer.
+pub unsafe trait WorkItemAdapter: WorkItem {
+    /// Run this work item.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called via the function pointer that `__enqueue` provides to the
+    /// `queue_work_on` closure, and only as described in the documentation of `queue_work_on`.
+    unsafe extern "C" fn run(ptr: *mut bindings::work_struct);
+}
+
+/// Links for a work item.
+///
+/// This struct contains a function pointer to the `T::run` function from the `WorkItemAdapter`
+/// trait, and defines the linked list pointers necessary to enqueue a work item in a workqueue.
+///
+/// Wraps the kernel's C `struct work_struct`.
+///
+/// This is a helper type used to associate a `work_struct` with the `WorkItemAdapter` that uses
+/// it.
+#[repr(transparent)]
+pub struct Work<T: ?Sized> {
+    work: Opaque<bindings::work_struct>,
+    _pin: PhantomPinned,
+    _adapter: PhantomData<T>,
+}
+
+// SAFETY: Kernel work items are usable from any thread.
+//
+// We do not need to constrain `T` since the work item does not actually contain a `T`.
+unsafe impl<T: ?Sized> Send for Work<T> {}
+unsafe impl<T: ?Sized> Sync for Work<T> {}
+
+impl<T: ?Sized> Work<T> {
+    /// Creates a new instance of [`Work`].
+    #[inline]
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new() -> impl PinInit<Self>
+    where
+        T: WorkItemAdapter,
+    {
+        // SAFETY: The `WorkItemAdapter` implementation promises that `T::run` can be used as the
+        // work item function.
+        unsafe {
+            kernel::init::pin_init_from_closure(move |slot| {
+                bindings::__INIT_WORK(Self::raw_get(slot), Some(T::run), false);
+                Ok(())
+            })
+        }
+    }
+
+    /// Get a pointer to the inner `work_struct`.
+    ///
+    /// # Safety
+    ///
+    /// The provided pointer must not be dangling. (But it need not be initialized.)
+    #[inline]
+    pub unsafe fn raw_get(ptr: *const Self) -> *mut bindings::work_struct {
+        // SAFETY: The caller promises that the pointer is valid.
+        //
+        // A pointer cast would also be ok due to `#[repr(transparent)]`. We use `addr_of!` so that
+        // the compiler does not complain that `work` is unused.
+        unsafe { Opaque::raw_get(core::ptr::addr_of!((*ptr).work)) }
+    }
+}
+
+/// Declares that a type has a `Work<T>` field.
+///
+/// # Safety
+///
+/// The OFFSET constant must be the offset of a field in Self of type `Work<T>`. The methods on
+/// this trait must have exactly the behavior that the definitions given below have.
+pub unsafe trait HasWork<T> {
+    /// The offset of the `Work<T>` field.
+    const OFFSET: usize;
+
+    /// Returns the offset of the `Work<T>` field.
+    ///
+    /// This method exists because the OFFSET constant cannot be accessed if the type is not Sized.
+    #[inline]
+    fn get_work_offset(&self) -> usize {
+        Self::OFFSET
+    }
+
+    /// Returns a pointer to the `Work<T>` field.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must not be dangling. (But the memory need not be initialized.)
+    #[inline]
+    unsafe fn raw_get_work(ptr: *mut Self) -> *mut Work<T>
+    where
+        Self: Sized,
+    {
+        // SAFETY: The caller promises that the pointer is not dangling.
+        unsafe { (ptr as *mut u8).add(Self::OFFSET) as *mut Work<T> }
+    }
+
+    /// Returns a pointer to the struct containing the `Work<T>` field.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must not be dangling. (But the memory need not be initialized.)
+    #[inline]
+    unsafe fn work_container_of(ptr: *mut Work<T>) -> *mut Self
+    where
+        Self: Sized,
+    {
+        // SAFETY: The caller promises that the pointer is not dangling.
+        unsafe { (ptr as *mut u8).sub(Self::OFFSET) as *mut Self }
+    }
+}
+
+/// Used to safely implement the `HasWork<T>` trait.
+///
+/// # Examples
+///
+/// ```
+/// use kernel::sync::Arc;
+///
+/// struct MyStruct {
+///     work_field: Work<Arc<MyStruct>>,
+/// }
+///
+/// impl_has_work! {
+///     impl HasWork<Arc<MyStruct>> for MyStruct { self.work_field }
+/// }
+/// ```
+#[macro_export]
+macro_rules! impl_has_work {
+    ($(impl$(<$($implarg:ident),*>)?
+       HasWork<$work_type:ty>
+       for $self:ident $(<$($selfarg:ident),*>)?
+       { self.$field:ident }
+    )*) => {$(
+        // SAFETY: The implementation of `raw_get_work` only compiles if the field has the right
+        // type.
+        unsafe impl$(<$($implarg),*>)? $crate::workqueue::HasWork<$work_type> for $self $(<$($selfarg),*>)? {
+            const OFFSET: usize = $crate::offset_of!(Self, $field) as usize;
+
+            #[inline]
+            unsafe fn raw_get_work(ptr: *mut Self) -> *mut $crate::workqueue::Work<$work_type> {
+                // SAFETY: The caller promises that the pointer is not dangling.
+                unsafe {
+                    ::core::ptr::addr_of_mut!((*ptr).$field)
+                }
+            }
+        }
+    )*};
 }
 
 // === built-in queues ===
