@@ -4,7 +4,7 @@
 //!
 //! C header: [`include/linux/workqueue.h`](../../../../include/linux/workqueue.h)
 
-use crate::{bindings, prelude::*, types::Opaque};
+use crate::{bindings, prelude::*, sync::Arc, types::Opaque};
 use core::marker::{PhantomData, PhantomPinned};
 
 /// A kernel work queue.
@@ -255,6 +255,332 @@ macro_rules! impl_has_work {
             }
         }
     )*};
+}
+
+// === ArcWorkItem ===
+
+/// Declares that `Arc<Self>` should implement `WorkItem`.
+///
+/// # Examples
+///
+/// The example below will make `Arc<MyStruct>` implement the WorkItem trait so that you can
+/// enqueue it in a workqueue.
+///
+/// ```
+/// use kernel::sync::Arc;
+///
+/// struct MyStruct {
+///     work_field: Work<Arc<MyStruct>>,
+/// }
+///
+/// kernel::impl_has_work! {
+///     impl HasWork<Arc<MyStruct>> for MyStruct { self.work_field }
+/// }
+///
+/// impl ArcWorkItem for MyStruct {
+///     fn run(self: Arc<Self>) {
+///         pr_info!("Executing MyStruct on a workqueue.");
+///     }
+/// }
+/// ```
+pub trait ArcWorkItem {
+    /// Called when this work item is executed.
+    fn run(self: Arc<Self>);
+}
+
+unsafe impl<T> WorkItem for Arc<T>
+where
+    T: ArcWorkItem + HasWork<Self> + ?Sized,
+{
+    type EnqueueOutput = Result<(), Self>;
+
+    unsafe fn __enqueue<F>(self, queue_work_on: F) -> Self::EnqueueOutput
+    where
+        F: FnOnce(*mut bindings::work_struct) -> bool,
+    {
+        let ptr = Arc::into_raw(self);
+
+        // Using `get_work_offset` here for object-safety.
+        //
+        // SAFETY: The pointer is valid since we just got it from `into_raw`.
+        let off = unsafe { (&*ptr).get_work_offset() };
+
+        // SAFETY: The `HasWork` impl promises that this offset gives us a field of type
+        // `Work<Self>` in the same allocation.
+        let work_ptr = unsafe { (ptr as *const u8).add(off) as *const Work<Self> };
+        // SAFETY: The pointer is not dangling.
+        let work_ptr = unsafe { Work::raw_get(work_ptr) };
+
+        match (queue_work_on)(work_ptr) {
+            true => Ok(()),
+            // SAFETY: The work queue has not taken ownership of the pointer.
+            false => Err(unsafe { Arc::from_raw(ptr) }),
+        }
+    }
+}
+
+// Let `Work<Arc<T>>` be usable with types that are `ArcWorkItem`.
+//
+// We do not allow unsized types here. The `Work<Arc<T>>` field should always specify the actual
+// concrete type stored in the `Arc`.
+//
+// SAFETY: The `Work<Arc<T>>` field must be initialized with this run method because the `Work`
+// struct prevents you from initializing it in any other way. The `__enqueue` trait uses the
+// same `Work<Arc<T>>` field because `HasWork` promises to always return the same field.
+unsafe impl<T> WorkItemAdapter for Arc<T>
+where
+    T: ArcWorkItem + HasWork<Self> + Sized,
+{
+    unsafe extern "C" fn run(ptr: *mut bindings::work_struct) {
+        // SAFETY: The `__enqueue` method always uses a `work_struct` stored in a `Work<Self>`.
+        let ptr = ptr as *mut Work<Self>;
+        // SAFETY: This computes the pointer that `__enqueue` got from `Arc::into_raw`.
+        let ptr = unsafe { T::work_container_of(ptr) };
+        // SAFETY: This pointer comes from `Arc::into_raw` and we've been given back ownership.
+        let arc = unsafe { Arc::from_raw(ptr) };
+
+        arc.run();
+    }
+}
+
+// === BoxWorkItem ===
+
+/// Declares that `Pin<Box<Self>>` should implement `WorkItem`.
+///
+/// # Examples
+///
+/// The example below will make `Pin<Box<MyStruct>>` implement the WorkItem trait so that you can
+/// enqueue it in a workqueue.
+///
+/// ```
+/// struct MyStruct {
+///     work_field: Work<Pin<Box<MyStruct>>>,
+/// }
+///
+/// kernel::impl_has_work! {
+///     impl HasWork<Pin<Box<MyStruct>>> for MyStruct { self.work_field }
+/// }
+///
+/// impl BoxWorkItem for MyStruct {
+///     fn run(self: Pin<Box<MyStruct>>) {
+///         pr_info!("Executing MyStruct on a workqueue.");
+///     }
+/// }
+/// ```
+pub trait BoxWorkItem {
+    /// Called when this work item is executed.
+    fn run(self: Pin<Box<Self>>);
+}
+
+unsafe impl<T> WorkItem for Pin<Box<T>>
+where
+    T: BoxWorkItem + HasWork<Self> + ?Sized,
+{
+    // When a box is in a workqueue, the workqueue has exclusive ownership of the box. Therefore,
+    // it's not possible to enqueue a box while it is in a workqueue.
+    type EnqueueOutput = ();
+
+    unsafe fn __enqueue<F>(self, queue_work_on: F)
+    where
+        F: FnOnce(*mut bindings::work_struct) -> bool,
+    {
+        // SAFETY: We will not used the contents in an unpinned manner.
+        let ptr = unsafe { Box::into_raw(Pin::into_inner_unchecked(self)) };
+
+        // Using `get_work_offset` here for object-safety.
+        //
+        // SAFETY: The pointer is valid since we just got it from `into_raw`.
+        let off = unsafe { (&*ptr).get_work_offset() };
+
+        // SAFETY: The `HasWork` impl promises that this offset gives us a field of type
+        // `Work<Self>` in the same allocation.
+        let work_ptr = unsafe { (ptr as *mut u8).add(off) as *mut Work<Self> };
+        // SAFETY: The pointer is not dangling.
+        let work_ptr = unsafe { Work::raw_get(work_ptr) };
+
+        match (queue_work_on)(work_ptr) {
+            true => {}
+            // SAFETY: This method requires exclusive ownership of the box, so it cannot be in a
+            // workqueue.
+            false => unsafe { core::hint::unreachable_unchecked() },
+        }
+    }
+}
+
+// Let `Work<Pin<Box<T>>>` be usable with types that are `BoxWorkItem`.
+//
+// We do not allow unsized types here. The `Work<Pin<Box<T>>>` field should always specify the actual
+// concrete type stored in the `Box`.
+//
+// SAFETY: The `Work<Pin<Box<T>>>` field must be initialized with this run method because the `Work`
+// struct prevents you from initializing it in any other way. The `__enqueue` trait uses the
+// same `Work<Pin<Box<T>>>` field because `HasWork` promises to always return the same field.
+unsafe impl<T> WorkItemAdapter for Pin<Box<T>>
+where
+    T: BoxWorkItem + HasWork<Self> + Sized,
+{
+    unsafe extern "C" fn run(ptr: *mut bindings::work_struct) {
+        // SAFETY: The `__enqueue` method always uses a `work_struct` stored in a `Work<Self>`.
+        let ptr = ptr as *mut Work<Self>;
+        // SAFETY: This computes the pointer that `__enqueue` got from `Arc::into_raw`.
+        let ptr = unsafe { T::work_container_of(ptr) };
+        // SAFETY: This pointer comes from `Box::into_raw` and we've been given back ownership.
+        // The box was originally pinned, so pinning it again is ok.
+        let boxed = unsafe { Pin::new_unchecked(Box::from_raw(ptr)) };
+
+        boxed.run();
+    }
+}
+
+// === Newtype adapter macro ===
+
+/// Helper macro for structs with several `Work` fields that can be in several queues at once.
+///
+/// For each `Work` field in your type `T`, a newtype struct that wraps an `Arc<T>` or
+/// `Pin<Box<T>>` should be defined.
+///
+/// # Examples
+///
+/// ```
+/// struct MyStruct {
+///     work1: Work<MyStructWork1>,
+///     work2: Work<MyStructWork2>,
+/// }
+///
+/// impl_has_work! {
+///     impl HasWork<MyStructWork1> for MyStruct { self.work1 }
+///     impl HasWork<MyStructWork2> for MyStruct { self.work2 }
+/// }
+///
+/// define_work_adapter_newtype! {
+///     struct MyStructWork1(Arc<MyStruct>);
+///     struct MyStructWork2(Arc<MyStruct>);
+/// }
+///
+/// impl MyStructWork1 {
+///     fn run(self) {
+///         // ...
+///     }
+/// }
+///
+/// impl MyStructWork2 {
+///     fn run(self) {
+///         // ...
+///     }
+/// }
+/// ```
+/// This will let you push an `MyStructWork1(arc)` or `MyStructWork2(arc)` to a work queue. The arc
+/// can be in two work queues at the same time, and the `run` method on the wrapper type is called
+/// when the work item is called.
+#[macro_export]
+macro_rules! define_work_adapter_newtype {
+    (
+        $(#[$outer:meta])*
+        $pub:vis struct $name:ident(
+            $(#[$innermeta:meta])*
+            $fpub:vis Arc<$inner:ty> $(,)?
+        );
+        $($rest:tt)*
+    ) => {
+        $(#[$outer])*
+        $pub struct $name($(#[$innermeta])* $fpub $crate::sync::Arc<$inner>);
+
+        unsafe impl $crate::workqueue::WorkItem for $name {
+            type EnqueueOutput = ::core::result::Result<(), $name>;
+
+            unsafe fn __enqueue<F>(self, queue_work_on: F) -> Self::EnqueueOutput
+            where
+                F: ::core::ops::FnOnce(*mut $crate::bindings::work_struct) -> bool,
+            {
+                let ptr = $crate::sync::Arc::into_raw(self.0);
+
+                // SAFETY: The pointer is not dangling since we just got it from Arc::into_raw.
+                let work_ptr = unsafe { <$inner as $crate::workqueue::HasWork::<$name>>::raw_get_work(ptr.cast_mut()) };
+
+                // SAFETY: The pointer is not dangling.
+                let work_ptr = unsafe { $crate::workqueue::Work::raw_get(work_ptr) };
+
+                match (queue_work_on)(work_ptr) {
+                    true => Ok(()),
+                    // SAFETY: The work queue has not taken ownership of the pointer.
+                    false => Err($name(unsafe { $crate::sync::Arc::from_raw(ptr) })),
+                }
+            }
+        }
+
+        unsafe impl $crate::workqueue::WorkItemAdapter for $name {
+            unsafe extern "C" fn run(ptr: *mut $crate::bindings::work_struct) {
+                // SAFETY: The `__enqueue` method always uses a `work_struct` stored in a `Work<Self>`.
+                let ptr = ptr as *mut $crate::workqueue::Work<Self>;
+                // SAFETY: This computes the pointer that `__enqueue` got from `Arc::into_raw`.
+                let ptr = unsafe { <$inner as $crate::workqueue::HasWork::<$name>>::work_container_of(ptr) };
+                // SAFETY: This pointer comes from `Arc::into_raw` and we've been given back ownership.
+                let arc = unsafe { $crate::sync::Arc::from_raw(ptr) };
+
+                $name::run($name(arc));
+            }
+        }
+
+        define_work_adapter_newtype! { $($rest)* }
+    };
+
+    (
+        $(#[$outer:meta])*
+        $pub:vis struct $name:ident(
+            $(#[$innermeta:meta])*
+            $fpub:vis Pin<Box<$inner:ty>> $(,)?
+        );
+        $($rest:tt)*
+    ) => {
+        $(#[$outer])*
+        $pub struct $name($(#[$innermeta])* $fpub ::core::pin::Pin<::alloc::boxed::Box<$inner>>);
+
+        unsafe impl $crate::workqueue::WorkItem for $name {
+            type EnqueueOutput = ();
+
+            unsafe fn __enqueue<F>(self, queue_work_on: F)
+            where
+                F: ::core::ops::FnOnce(*mut $crate::bindings::work_struct) -> bool,
+            {
+                // SAFETY: We will not used the contents in an unpinned manner.
+                let boxed = unsafe { ::core::pin::Pin::into_inner_unchecked(self.0) };
+                let ptr = ::alloc::boxed::Box::into_raw(boxed);
+
+                // SAFETY: The pointer is not dangling since we just got it from Box::into_raw.
+                let work_ptr = unsafe { <$inner as $crate::workqueue::HasWork::<$name>>::raw_get_work(ptr) };
+
+                // SAFETY: The pointer is not dangling.
+                let work_ptr = unsafe { $crate::workqueue::Work::raw_get(work_ptr) };
+
+                match (queue_work_on)(work_ptr) {
+                    true => {},
+                    // SAFETY: This method requires exclusive ownership of the box, so it cannot be in a
+                    // workqueue.
+                    false => unsafe { ::core::hint::unreachable_unchecked() },
+                }
+            }
+        }
+
+        unsafe impl $crate::workqueue::WorkItemAdapter for $name {
+            unsafe extern "C" fn run(ptr: *mut $crate::bindings::work_struct) {
+                // SAFETY: The `__enqueue` method always uses a `work_struct` stored in a `Work<Self>`.
+                let ptr = ptr as *mut $crate::workqueue::Work<Self>;
+                // SAFETY: This computes the pointer that `__enqueue` got from `Arc::into_raw`.
+                let ptr = unsafe { <$inner as $crate::workqueue::HasWork::<$name>>::work_container_of(ptr) };
+                // SAFETY: This pointer comes from `Box::into_raw` and we've been given back ownership.
+                let boxed = unsafe { ::alloc::boxed::Box::from_raw(ptr) };
+                // SAFETY: The box was originally pinned, so pinning it again is ok.
+                let boxed = unsafe { ::core::pin::Pin::new_unchecked(boxed) };
+
+                $name::run($name(boxed));
+            }
+        }
+
+        define_work_adapter_newtype! { $($rest)* }
+    };
+
+    // After processing the last definition, we call ourselves with no input.
+    () => {};
 }
 
 // === built-in queues ===
