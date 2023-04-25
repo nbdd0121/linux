@@ -56,6 +56,43 @@ impl Queue {
             })
         }
     }
+
+    /// Tries to spawn the given function or closure as a work item.
+    ///
+    /// Users are encouraged to use [`spawn_work_item`] as it automatically defines the lock class
+    /// key to be used.
+    pub fn try_spawn<T: 'static + Send + Fn()>(&self, func: T) -> Result {
+        let init = pin_init!(ClosureWork {
+            work <- Work::new(),
+            func: Some(func),
+        });
+
+        self.enqueue(Box::pin_init(init)?);
+        Ok(())
+    }
+}
+
+/// A helper type used in `try_spawn`.
+#[pin_data]
+struct ClosureWork<T> {
+    #[pin]
+    work: Work<Pin<Box<ClosureWork<T>>>>,
+    func: Option<T>,
+}
+
+impl<T> ClosureWork<T> {
+    fn project(self: Pin<&mut Self>) -> &mut Option<T> {
+        // SAFETY: The `func` field is not structurally pinned.
+        unsafe { &mut self.get_unchecked_mut().func }
+    }
+}
+
+impl<T: FnOnce()> BoxWorkItem for ClosureWork<T> {
+    fn run(mut self: Pin<Box<Self>>) {
+        if let Some(func) = self.as_mut().project().take() {
+            (func)()
+        }
+    }
 }
 
 /// A work item.
@@ -255,6 +292,10 @@ macro_rules! impl_has_work {
             }
         }
     )*};
+}
+
+impl_has_work! {
+    impl<T> HasWork<Pin<Box<Self>>> for ClosureWork<T> { self.work }
 }
 
 // === ArcWorkItem ===
