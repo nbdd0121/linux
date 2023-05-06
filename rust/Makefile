@@ -9,11 +9,11 @@ obj-$(CONFIG_RUST) += helpers.o
 CFLAGS_REMOVE_helpers.o = -Wmissing-prototypes -Wmissing-declarations
 
 always-$(CONFIG_RUST) += libproc_macro2.rlib libquote.rlib libsyn.rlib
-always-$(CONFIG_RUST) += libserde_derive.so libmacros.so
-no-clean-files += libserde_derive.so libmacros.so
+always-$(CONFIG_RUST) += libmacros.so
+no-clean-files += libmacros.so
 
 always-$(CONFIG_RUST) += bindings/bindings_generated.rs bindings/bindings_helpers_generated.rs
-obj-$(CONFIG_RUST) += alloc.o bindings.o serde.o kernel.o
+obj-$(CONFIG_RUST) += alloc.o bindings.o kernel.o
 always-$(CONFIG_RUST) += exports_alloc_generated.h exports_bindings_generated.h \
     exports_kernel_generated.h
 
@@ -105,23 +105,6 @@ syn-flags := \
     --cfg 'feature="visit"' \
     --cfg 'feature="visit-mut"'
 
-serde_derive-skip_flags := \
-    --edition=2021 \
-    -Drust_2018_idioms \
-    -Dunreachable_pub
-
-serde_derive-flags := \
-    -Amissing_docs
-
-serde-skip_flags := \
-    --edition=2021 \
-    -Drust_2018_idioms \
-    -Dunreachable_pub
-
-serde-flags := \
-    -Amissing_docs \
-    --cfg no_fp_fmt_parse
-
 quiet_cmd_rustdoc = RUSTDOC $(if $(rustdoc_host),H, ) $<
       cmd_rustdoc = \
 	OBJTREE=$(abspath $(objtree)) \
@@ -144,7 +127,7 @@ quiet_cmd_rustdoc = RUSTDOC $(if $(rustdoc_host),H, ) $<
 # command-like flags to solve the issue. Meanwhile, we use the non-custom case
 # and then retouch the generated files.
 rustdoc: rustdoc-core rustdoc-macros rustdoc-compiler_builtins \
-    rustdoc-alloc rustdoc-kernel rustdoc-serde rustdoc-serde_derive
+    rustdoc-alloc rustdoc-kernel
 	$(Q)cp $(srctree)/Documentation/images/logo.svg $(objtree)/$(obj)/doc
 	$(Q)cp $(srctree)/Documentation/images/COPYING-logo $(objtree)/$(obj)/doc
 	$(Q)find $(objtree)/$(obj)/doc -name '*.html' -type f -print0 | xargs -0 sed -Ei \
@@ -179,23 +162,10 @@ rustdoc-alloc: $(src)/alloc/lib.rs rustdoc-core rustdoc-compiler_builtins FORCE
 
 rustdoc-kernel: private rustc_target_flags = --extern alloc \
     --extern build_error --extern macros=$(objtree)/$(obj)/libmacros.so \
-    --extern bindings --extern uapi --extern serde --extern serde_derive
+    --extern bindings --extern uapi
 rustdoc-kernel: $(src)/kernel/lib.rs rustdoc-core rustdoc-macros \
-    rustdoc-compiler_builtins rustdoc-alloc rustdoc-serde $(obj)/libmacros.so \
-    $(obj)/bindings.o $(obj)/libserde_derive.so FORCE
-	$(call if_changed,rustdoc)
-
-rustdoc-serde_derive: private rustdoc_host = yes
-rustdoc-serde_derive: private skip_flags = $(serde_derive-skip_flags)
-rustdoc-serde_derive: private rustc_target_flags = --crate-type proc-macro \
-    --extern proc_macro -Amissing_docs
-rustdoc-serde_derive: $(src)/serde_derive/lib.rs FORCE
-	$(call if_changed,rustdoc)
-
-rustdoc-serde: private skip_flags = $(serde-skip_flags)
-rustdoc-serde: private rustc_target_flags = --extern alloc --extern serde \
-    -Arustdoc::broken_intra_doc_links
-rustdoc-serde: $(src)/serde/lib.rs rustdoc-core FORCE
+    rustdoc-compiler_builtins rustdoc-alloc $(obj)/libmacros.so \
+    $(obj)/bindings.o FORCE
 	$(call if_changed,rustdoc)
 
 quiet_cmd_rustc_test_library = RUSTC TL $<
@@ -238,18 +208,6 @@ rusttestlib-bindings: $(src)/bindings/lib.rs rusttest-prepare FORCE
 	$(call if_changed,rustc_test_library)
 
 rusttestlib-uapi: $(src)/uapi/lib.rs rusttest-prepare FORCE
-	$(call if_changed,rustc_test_library)
-
-rusttestlib-serde_derive: private skip_flags = $(serde_derive-skip_flags)
-rusttestlib-serde_derive: private rustc_target_flags = --extern proc_macro \
-    --extern quote --extern syn $(serde_derive-flags)
-rusttestlib-serde_derive: private rustc_test_library_proc = yes
-rusttestlib-serde_derive: $(src)/serde_derive/lib.rs rusttestlib-syn FORCE
-	$(call if_changed,rustc_test_library)
-
-rusttestlib-serde: private skip_flags = $(serde-skip_flags)
-rusttestlib-serde: private rustc_target_flags = $(serde-flags)
-rusttestlib-serde: $(src)/serde/lib.rs rusttest-prepare FORCE
 	$(call if_changed,rustc_test_library)
 
 quiet_cmd_rustdoc_test = RUSTDOC T $<
@@ -335,11 +293,10 @@ rusttest-macros: $(src)/macros/lib.rs rusttestlib-syn FORCE
 	$(call if_changed,rustdoc_test)
 
 rusttest-kernel: private rustc_target_flags = --extern alloc \
-    --extern build_error --extern macros --extern bindings --extern uapi \
-    --extern serde --extern serde_derive
+    --extern build_error --extern macros --extern bindings --extern uapi 
 rusttest-kernel: $(src)/kernel/lib.rs rusttest-prepare \
     rusttestlib-build_error rusttestlib-macros rusttestlib-bindings \
-    rusttestlib-uapi rusttestlib-serde rusttestlib-serde_derive FORCE
+    rusttestlib-uapi FORCE
 	$(call if_changed,rustc_test)
 	$(call if_changed,rustc_test_library)
 
@@ -480,12 +437,6 @@ quiet_cmd_rustc_procmacro = $(RUSTC_OR_CLIPPY_QUIET) P $@
 # Procedural macros can only be used with the `rustc` that compiled it.
 # Therefore, to get `libmacros.so` automatically recompiled when the compiler
 # version changes, we add `core.o` as a dependency (even if it is not needed).
-$(obj)/libserde_derive.so: private skip_clippy = 1
-$(obj)/libserde_derive.so: private skip_flags = $(serde_derive-skip_flags)
-$(obj)/libserde_derive.so: private rustc_target_flags = $(serde_derive-flags)
-$(obj)/libserde_derive.so: $(src)/serde_derive/lib.rs $(obj)/libsyn.rlib $(obj)/core.o FORCE
-	$(call if_changed_dep,rustc_procmacro)
-
 $(obj)/libmacros.so: $(src)/macros/lib.rs $(obj)/libsyn.rlib $(obj)/core.o FORCE
 	$(call if_changed_dep,rustc_procmacro)
 
@@ -548,18 +499,10 @@ $(obj)/uapi.o: $(src)/uapi/lib.rs \
     $(obj)/uapi/uapi_generated.rs FORCE
 	$(call if_changed_dep,rustc_library)
 
-$(obj)/serde.o: private skip_clippy = 1
-$(obj)/serde.o: private skip_flags = $(serde-skip_flags)
-$(obj)/serde.o: private rustc_target_flags = $(serde-flags)
-$(obj)/serde.o: $(src)/serde/lib.rs $(obj)/compiler_builtins.o FORCE
-	$(call if_changed_dep,rustc_library)
-
 $(obj)/kernel.o: private rustc_target_flags = --extern alloc \
-    --extern build_error --extern macros --extern bindings --extern uapi \
-    --extern serde --extern serde_derive
+    --extern build_error --extern macros --extern bindings --extern uapi 
 $(obj)/kernel.o: $(src)/kernel/lib.rs $(obj)/alloc.o $(obj)/build_error.o \
-    $(obj)/libmacros.so $(obj)/bindings.o $(obj)/uapi.o \
-    $(obj)/serde.o $(obj)/libserde_derive.so FORCE
+    $(obj)/libmacros.so $(obj)/bindings.o $(obj)/uapi.o FORCE
 	$(call if_changed_dep,rustc_library)
 
 endif # CONFIG_RUST
