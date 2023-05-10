@@ -431,7 +431,7 @@ quiet_cmd_rustc_procmacro = $(RUSTC_OR_CLIPPY_QUIET) P $@
 	$(if $(skip_clippy),$(RUSTC),$(RUSTC_OR_CLIPPY)) \
 		$(filter-out $(skip_flags),$(rust_common_flags) $(rustc_target_flags)) \
 		--emit=dep-info=$(depfile) --emit=link=$@ --extern proc_macro \
-		--extern quote --extern syn --crate-type proc-macro \
+		--extern proc_macro2 --extern quote --extern syn --crate-type proc-macro \
 		-L$(objtree)/$(obj) --crate-name $(patsubst lib%.so,%,$(notdir $@)) $<
 
 # Procedural macros can only be used with the `rustc` that compiled it.

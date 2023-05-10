@@ -5,13 +5,16 @@
 #[macro_use]
 mod quote;
 mod concat_idents;
+mod field;
 mod helpers;
 mod module;
 mod pin_data;
 mod pinned_drop;
+mod pin;
 mod vtable;
 
 use proc_macro::TokenStream;
+use syn::Error;
 
 /// Declares a kernel module.
 ///
@@ -245,4 +248,18 @@ pub fn pin_data(inner: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
     pinned_drop::pinned_drop(args, input)
+}
+
+#[proc_macro_derive(Field)]
+pub fn field(input: TokenStream) -> TokenStream {
+    field::field(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+#[proc_macro_derive(PinField, attributes(pin))]
+pub fn pin_field(input: TokenStream) -> TokenStream {
+    pin::pin_field(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
