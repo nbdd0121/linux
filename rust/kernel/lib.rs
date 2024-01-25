@@ -29,6 +29,9 @@ compile_error!("Missing kernel configuration for conditional compilation");
 // Allow proc-macros to refer to `::kernel` inside the `kernel` crate (this crate).
 extern crate self as kernel;
 
+// Re-export the FFI crate from `kernel` crate.
+pub use ffi;
+
 #[cfg(not(test))]
 #[cfg(not(testlib))]
 mod allocator;

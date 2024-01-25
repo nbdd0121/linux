@@ -39,7 +39,7 @@ pub unsafe trait Backend {
     /// remain valid for read indefinitely.
     unsafe fn init(
         ptr: *mut Self::State,
-        name: *const core::ffi::c_char,
+        name: *const kernel::ffi::c_char,
         key: *mut bindings::lock_class_key,
     );
 
