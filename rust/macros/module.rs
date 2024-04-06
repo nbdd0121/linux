@@ -3,7 +3,7 @@
 use std::iter;
 
 use proc_macro2::{Literal, TokenStream};
-use quote::{format_ident, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
     bracketed,
     parse::{Parse, ParseStream},
@@ -37,9 +37,9 @@ impl<'a> ModInfoBuilder<'a> {
         let length = string.len();
         let string = Literal::byte_string(string.as_bytes());
         let cfg = if builtin {
-            ::quote::quote!(#[cfg(not(MODULE))])
+            quote!(#[cfg(not(MODULE))])
         } else {
-            ::quote::quote!(#[cfg(MODULE)])
+            quote!(#[cfg(MODULE)])
         };
 
         let counter = format_ident!(
@@ -47,7 +47,7 @@ impl<'a> ModInfoBuilder<'a> {
             module = self.module,
             counter = self.counter
         );
-        self.ts.extend(::quote::quote! {
+        self.ts.extend(quote! {
             #cfg
             #[doc(hidden)]
             #[link_section = ".modinfo"]
@@ -211,7 +211,7 @@ impl Parse for ModuleInfo {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut info = Self::default();
         let fields: Punctuated<Field, Token![,]> = Punctuated::parse_terminated(input)?;
-        let tokens = ::quote::quote!(#fields);
+        let tokens = quote!(#fields);
         let mut fields: Vec<Field> = fields.into_iter().collect();
         let mut errors = vec![];
         if !fields.iter().any(|f| matches!(f, Field::Type(..))) {
@@ -332,7 +332,7 @@ pub(crate) fn module(
         let bytes = name.bytes().chain(iter::once(0)).collect::<Vec<_>>();
         Literal::byte_string(&bytes)
     };
-    ::quote::quote! {
+    quote! {
         /// The module name.
         ///
         /// Used by the printing macros, e.g. [`info!`].

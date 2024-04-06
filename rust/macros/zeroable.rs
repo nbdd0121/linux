@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use proc_macro2::TokenStream;
+use quote::quote;
 use syn::{
     parse_quote, Data, DataStruct, DeriveInput, Error, GenericParam, Result, TypeParam,
     WherePredicate,
@@ -38,7 +39,7 @@ pub(crate) fn derive(
         ));
     };
     let field_ty = fields.iter().map(|f| &f.ty);
-    Ok(::quote::quote! {
+    Ok(quote! {
         // SAFETY: Every field type implements `Zeroable` and padding bytes may be zero.
         #[automatically_derived]
         unsafe impl #impl_g ::kernel::init::Zeroable for #ident #type_g

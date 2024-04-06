@@ -2,8 +2,6 @@
 
 //! Crate for all kernel procedural macros.
 
-#[macro_use]
-mod quote;
 mod concat_idents;
 mod module;
 mod paste;
@@ -14,6 +12,7 @@ mod vtable;
 mod zeroable;
 
 use proc_macro::TokenStream;
+use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
 /// Declares a kernel module.
@@ -81,7 +80,7 @@ pub fn module(input: TokenStream) -> TokenStream {
         Ok(input) => module::module(input),
         Err(err) => {
             let err = err.into_compile_error();
-            ::quote::quote! {
+            quote! {
                 // Supresses missing `__LOG_PREFIX` errors from printing macros.
                 const __LOG_PREFIX: &[u8] = b"";
                 // Due to this error, it will not compile, so an empty `__LOG_PREFIX` is fine.

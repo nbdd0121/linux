@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use proc_macro2::TokenStream;
-use quote::ToTokens;
+use quote::{quote, ToTokens};
 use syn::{parse_quote, Error, ImplItem, ImplItemFn, ItemImpl, Token};
 
 struct PinnedDropImpl(ItemImpl, ImplItemFn);
@@ -19,7 +19,7 @@ impl TryFrom<ItemImpl> for PinnedDropImpl {
                 ..
             } if path.is_ident("PinnedDrop") => {
                 let (impl_generics, _, whr) = generics.split_for_impl();
-                ::quote::quote! {
+                quote! {
                     #(#attrs)*
                     unsafe #impl_token #impl_generics #polarity ::kernel::init::PinnedDrop #for_ #self_ty
                         #whr
@@ -31,7 +31,7 @@ impl TryFrom<ItemImpl> for PinnedDropImpl {
                     }
                 }
             }
-            _ => ::quote::quote!(#impl_),
+            _ => quote!(#impl_),
         };
         if impl_.unsafety.is_some() {
             return Err((
@@ -43,9 +43,9 @@ impl TryFrom<ItemImpl> for PinnedDropImpl {
             ));
         }
         let trait_tokens = match &impl_.trait_ {
-            None => ::quote::quote!(),
-            Some((None, path, _)) => ::quote:: quote!(#path),
-            Some((Some(not), path, _)) => ::quote:: quote!(#not #path),
+            None => quote!(),
+            Some((None, path, _)) =>  quote!(#path),
+            Some((Some(not), path, _)) =>  quote!(#not #path),
         };
         match &impl_.trait_ {
             Some((None, path, _)) if path.is_ident("PinnedDrop") => {}
@@ -108,5 +108,5 @@ pub(crate) fn pinned_drop(drop_impl: ItemImpl) -> Result<TokenStream, (Error, To
         parse_quote!(::kernel::init::PinnedDrop),
         Token![for](span),
     ));
-    Ok(::quote::quote! { #drop_impl })
+    Ok(quote! { #drop_impl })
 }

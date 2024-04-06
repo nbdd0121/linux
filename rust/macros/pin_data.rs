@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use proc_macro2::TokenStream;
+use quote::quote;
 use syn::{
     parse_quote,
     spanned::Spanned,
@@ -28,7 +29,7 @@ pub(crate) fn pin_data(args: TokenStream, mut struct_: ItemStruct) -> TokenStrea
     for field in &mut struct_.fields {
         if !is_pinned(field) && is_phantom_pinned(&field.ty) {
             let field_name = format!("{}", field.ident.as_ref().unwrap());
-            errors.extend(::quote::quote! {
+            errors.extend(quote! {
                 ::core::compile_error!(concat!(
                     "The field `",
                     #field_name,
@@ -38,7 +39,7 @@ pub(crate) fn pin_data(args: TokenStream, mut struct_: ItemStruct) -> TokenStrea
         }
         field.attrs.retain(|a| !a.path().is_ident("pin"));
     }
-    ::quote::quote! {
+    quote! {
         #struct_
 
         #errors
@@ -125,7 +126,7 @@ fn generate_the_pin_data(
         .iter()
         .filter(|f| is_pinned(f))
         .map(|Field { vis, ident, ty, .. }| {
-            ::quote::quote! {
+            quote! {
                 #vis unsafe fn #ident<E>(
                     self,
                     slot: *mut #ty,
@@ -140,7 +141,7 @@ fn generate_the_pin_data(
         .iter()
         .filter(|f| !is_pinned(f))
         .map(|Field { vis, ident, ty, .. }| {
-            ::quote::quote! {
+            quote! {
                 #vis unsafe fn #ident<E>(
                     self,
                     slot: *mut #ty,
@@ -151,7 +152,7 @@ fn generate_the_pin_data(
             }
         })
         .collect::<TokenStream>();
-    ::quote::quote! {
+    quote! {
         // We declare this struct which will host all of the projection function for our type. It
         // will be invariant over all generic parameters which are inherited from the struct.
         #vis struct __ThePinData #generics
@@ -240,7 +241,7 @@ fn unpin_impl(
     for field in &mut pinned_fields {
         field.attrs.retain(|a| !a.path().is_ident("pin"));
     }
-    ::quote::quote! {
+    quote! {
         // This struct will be used for the unpin analysis. It is needed, because only structurally
         // pinned fields are relevant whether the struct should implement `Unpin`.
         #[allow(dead_code)] // The fields below are never used.
@@ -276,7 +277,7 @@ fn drop_impl(
     // `PinnedDrop` was specified in `args`.
     if has_pinned_drop {
         // When `PinnedDrop` was specified we just implement `Drop` and delegate.
-        ::quote::quote! {
+        quote! {
             impl #impl_generics ::core::ops::Drop for #ident #ty_generics
                 #whr
             {
@@ -293,7 +294,7 @@ fn drop_impl(
         }
     } else {
         // When no `PinnedDrop` was specified, then we have to prevent implementing drop.
-        ::quote::quote! {
+        quote! {
             // We prevent this by creating a trait that will be implemented for all types implementing
             // `Drop`. Additionally we will implement this trait for the struct leading to a conflict,
             // if it also implements `Drop`

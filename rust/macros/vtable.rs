@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use proc_macro2::TokenStream;
-use quote::format_ident;
+use quote::{format_ident, quote};
 use std::collections::HashSet;
 use syn::{
     parse::{Parse, ParseStream},
@@ -62,7 +62,7 @@ fn handle_impl(mut impl_: ItemImpl) -> TokenStream {
             .push(parse_quote!(const #gen_const_name: bool = true;));
         consts.insert(format!("{gen_const_name}"));
     }
-    ::quote::quote! { #impl_ }
+    quote! { #impl_ }
 }
 
 fn handle_trait(mut trait_: ItemTrait) -> TokenStream {
@@ -96,5 +96,5 @@ fn handle_trait(mut trait_: ItemTrait) -> TokenStream {
         ));
         consts.insert(format!("{gen_const_name}"));
     }
-    ::quote::quote! { #trait_ }
+    quote! { #trait_ }
 }

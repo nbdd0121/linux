@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::format_ident;
+use quote::{format_ident, quote};
 use syn::{
     braced,
     parse::{Parse, ParseStream},
@@ -42,9 +42,9 @@ pub(crate) fn primitive_init(
         Err(err) => return err.to_compile_error(),
     };
     let zeroable_check = match init_kind {
-        InitKind::Normal => ::quote::quote! {},
+        InitKind::Normal => quote! {},
 
-        InitKind::Zeroing => ::quote::quote! {
+        InitKind::Zeroing => quote! {
             // The user specified `..Zeroable::zeroed()` at the end of the list of fields.
             // Therefore we check if the struct implements `Zeroable` and then zero the memory.
             // This allows us to also remove the check that all fields are present (since we
@@ -59,8 +59,8 @@ pub(crate) fn primitive_init(
         },
     };
     let this = match this {
-        None => ::quote::quote!(),
-        Some(This { ident, .. }) => ::quote::quote! {
+        None => quote!(),
+        Some(This { ident, .. }) => quote! {
             // Create the `this` so it can be referenced by the user inside of the
             // expressions creating the individual fields.
             let #ident = unsafe { ::core::ptr::NonNull::new_unchecked(slot) };
@@ -68,7 +68,7 @@ pub(crate) fn primitive_init(
     };
     let init_fields = init_fields(&fields, use_data);
     let field_check = make_field_check(&fields, init_kind, &path);
-    ::quote::quote! {{
+    quote! {{
         // We do not want to allow arbitrary returns, so we declare this type as the `Ok` return
         // type and shadow it later when we insert the arbitrary user code. That way there will be
         // no possibility of returning without `unsafe`.
@@ -116,7 +116,7 @@ fn get_init_kind(rest: Option<(Token![..], Expr)>) -> Result<InitKind> {
     let Some((dotdot, expr)) = rest else {
         return Ok(InitKind::Normal);
     };
-    let tokens = ::quote::quote!(#dotdot #expr);
+    let tokens = quote!(#dotdot #expr);
     macro_rules! bail {
         () => {{
             return Err(syn::Error::new_spanned(
@@ -168,8 +168,8 @@ fn init_fields(fields: &Punctuated<FieldInitializer, Token![,]>, use_data: bool)
                 let value = value
                     .as_ref()
                     .map(|value| &value.1)
-                    .map(|value| ::quote::quote!(let #ident = #value;));
-                ::quote::quote! {
+                    .map(|value| quote!(let #ident = #value;));
+                quote! {
                     {
                         #value
                         // Initialize the field.
@@ -181,7 +181,7 @@ fn init_fields(fields: &Punctuated<FieldInitializer, Token![,]>, use_data: bool)
             }
             FieldInitializer::Init { ident, value, .. } => {
                 if use_data {
-                    ::quote::quote! {
+                    quote! {
                         let init = #value;
                         // Call the initializer.
                         //
@@ -192,7 +192,7 @@ fn init_fields(fields: &Punctuated<FieldInitializer, Token![,]>, use_data: bool)
                         unsafe { data.#ident(::core::ptr::addr_of_mut!((*slot).#ident), init)? };
                     }
                 } else {
-                    ::quote::quote! {
+                    quote! {
                         let init = #value;
                         // Call the initializer.
                         //
@@ -209,7 +209,7 @@ fn init_fields(fields: &Punctuated<FieldInitializer, Token![,]>, use_data: bool)
             }
         };
         res.extend(init);
-        res.extend(::quote::quote! {
+        res.extend(quote! {
             // Create the drop guard:
             //
             // We rely on macro hygiene to make it impossible for users to access this local
@@ -222,7 +222,7 @@ fn init_fields(fields: &Punctuated<FieldInitializer, Token![,]>, use_data: bool)
             };
         });
     }
-    ::quote::quote! {
+    quote! {
         #res
         // If execution reaches this point, all fields have been initialized. Therefore we can now
         // dismiss the guards by forgetting them.
@@ -237,7 +237,7 @@ fn make_field_check(
 ) -> TokenStream {
     let fields = fields.iter().map(|f| f.ident());
     match init_kind {
-        InitKind::Normal => ::quote::quote! {
+        InitKind::Normal => quote! {
             // We use unreachable code to ensure that all fields have been mentioned exactly once,
             // this struct initializer will still be type-checked and complain with a very natural
             // error message if a field is forgotten/mentioned more than once.
@@ -251,7 +251,7 @@ fn make_field_check(
                 })
             };
         },
-        InitKind::Zeroing => ::quote::quote! {
+        InitKind::Zeroing => quote! {
             // We use unreachable code to ensure that all fields have been mentioned at most once.
             // Since the user specified `..Zeroable::zeroed()` at the end, all missing fields will
             // be zeroed. This struct initializer will still be type-checked and complain with a
