@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![allow(unused_macros)]
+
 use proc_macro::{TokenStream, TokenTree};
 
 pub(crate) trait ToTokens {
