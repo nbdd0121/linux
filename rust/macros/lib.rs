@@ -5,7 +5,6 @@
 #[macro_use]
 mod quote;
 mod concat_idents;
-mod helpers;
 mod module;
 mod paste;
 mod pin_data;
