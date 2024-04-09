@@ -164,18 +164,10 @@ pub fn module(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn vtable(args: TokenStream, input: TokenStream) -> TokenStream {
     parse_macro_input!(args as syn::parse::Nothing);
-    match syn::parse(input.clone()) {
-        // Item parsing falied, let the compiler handle the nice error output.
-        Ok(vtable::TraitOrImpl::ItemError) => input,
-        Ok(input) => vtable::vtable(input).into(),
-        Err(err) => {
-            let err = err.into_compile_error();
-            ::quote::quote! {
-                #err
-            }
-            .into()
-        }
-    }
+    let item = parse_macro_input!(input as syn::Item);
+    vtable::vtable(item)
+        .unwrap_or_else(|err| err.into_compile_error())
+        .into()
 }
 
 /// Concatenate two identifiers.
