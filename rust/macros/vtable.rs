@@ -2,9 +2,12 @@
 
 use std::collections::HashSet;
 
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::{Ident, TokenStream, Span};
 use quote::ToTokens;
-use syn::{parse_quote, Error, ImplItem, Item, ItemImpl, ItemTrait, Result, TraitItem};
+use syn::{
+    parse_quote, Error, ImplItem, ImplItemConst, Item, ItemImpl, ItemTrait, Result, Token,
+    TraitItem, TraitItemConst, Visibility,
+};
 
 fn handle_trait(mut item: ItemTrait) -> Result<ItemTrait> {
     let mut functions = Vec::new();
@@ -148,6 +151,29 @@ fn handle_impl(mut impl_: ItemImpl) -> Result<ItemImpl> {
                     .iter()
                     .any(|attr| attr.path().is_ident("unique"))
                 {
+                    // If the item is parsed as const, it means it have a value (e.g.
+                    // `const NAME: Ty = value;` rather than `const NAME: Ty;`.
+                    //
+                    // Raise an error in this case.
+                    Err(Error::new_spanned(
+                        &const_item.expr,
+                        "`#[unique]` item must not have a value",
+                    ))?
+                }
+            }
+            ImplItem::Verbatim(item) => {
+                // `const NAME: Ty;` is not a valid impl item (but still accepted by the parser).
+                // Which cause it to be given to us as verbatim. Parse it as trait item instead.
+                let mut const_item: TraitItemConst = syn::parse2(item)?;
+
+                consts.insert(const_item.ident.clone());
+
+                // Check for `#[unique]` constants, we have special treatment.
+                if const_item
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("unique"))
+                {
                     // Remove the attribute.
                     const_item
                         .attrs
@@ -190,15 +216,33 @@ fn handle_impl(mut impl_: ItemImpl) -> Result<ItemImpl> {
                     }
                     let self_ty = &impl_.self_ty;
 
-                    const_item.expr = parse_quote! {{
+                    let expr = parse_quote! {{
                         static IMPL: #ty = <#self_ty as #trait_>::#gen_const_impl_name;
                         &IMPL
                     }};
+
+                    // Turn the TraitItemConst to ImplItemConst.
+                    items.push(ImplItem::Const(ImplItemConst {
+                        attrs: const_item.attrs,
+                        vis: Visibility::Inherited,
+                        defaultness: None,
+                        const_token: const_item.const_token,
+                        ident: const_item.ident,
+                        generics: const_item.generics,
+                        colon_token: const_item.colon_token,
+                        ty: const_item.ty,
+                        eq_token: Token![=](Span::mixed_site()),
+                        expr,
+                        semi_token: const_item.semi_token,
+                    }));
 
                     items.push(parse_quote! {
                          const #gen_const_use_unique_attr_name: () = ();
                     });
                 }
+
+                // Don't push the verbatim item as is.
+                continue;
             }
             _ => {}
         }
