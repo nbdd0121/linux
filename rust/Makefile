@@ -64,8 +64,8 @@ proc_macro2-cfgs := \
     --cfg wrap_proc_macro
 
 proc_macro2-skip_flags := \
-    -Drust_2018_idioms \
-    -Dunreachable_pub
+    -Wrust_2018_idioms \
+    -Wunreachable_pub
 
 proc_macro2-flags := \
     -Amissing_docs \
@@ -76,7 +76,7 @@ quote-cfgs := \
 
 quote-skip_flags := \
     --edition=2021 \
-    -Drust_2018_idioms
+    -Wrust_2018_idioms
 
 quote-flags := \
     --edition=2018 \
@@ -98,8 +98,8 @@ syn-cfgs := \
     --cfg 'feature="visit-mut"'
 
 syn-skip_flags := \
-    -Drust_2018_idioms \
-    -Dunreachable_pub
+    -Wrust_2018_idioms \
+    -Wunreachable_pub
 
 syn-flags := \
     -Amissing_docs \
