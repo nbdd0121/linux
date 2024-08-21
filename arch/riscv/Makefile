@@ -44,6 +44,9 @@ else
 	KBUILD_CFLAGS += -mabi=ilp32
 	KBUILD_AFLAGS += -mabi=ilp32
 	KBUILD_LDFLAGS += -melf32lriscv
+
+	KBUILD_RUSTFLAGS += -Ctarget-cpu=generic-rv32 --target=riscv32imac-unknown-none-elf \
+			    -Cno-redzone
 endif
 
 ifndef CONFIG_RISCV_USE_LINKER_RELAXATION

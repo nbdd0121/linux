@@ -37,6 +37,11 @@ macro_rules! define_panicking_intrinsics(
     }
 );
 
+define_panicking_intrinsics!("`u64` division should not be used", {
+    __udivdi3,
+    __umoddi3,
+});
+
 define_panicking_intrinsics!("`f32` should not be used", {
     __addsf3,
     __eqsf2,
