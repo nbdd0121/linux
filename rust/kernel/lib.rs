@@ -18,7 +18,12 @@
 #![feature(new_uninit)]
 #![feature(receiver_trait)]
 #![feature(unsize)]
+// Stable in Rust 1.79
+#![feature(inline_const)]
+// Will be stable in Rust 1.83
 #![feature(const_mut_refs)]
+#![feature(const_ptr_write)]
+#![feature(const_maybe_uninit_as_mut_ptr)]
 
 // Ensure conditional compilation based on the kernel configuration works;
 // otherwise we may silently break things like initcall handling.

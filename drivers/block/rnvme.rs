@@ -23,7 +23,6 @@ use kernel::{
     dma, driver,
     error::code::*,
     new_spinlock, pci,
-    pci::define_pci_id_table,
     pci::Bar,
     prelude::*,
     sync::{Arc, SpinLock},
@@ -566,12 +565,15 @@ impl NvmeDevice {
 impl pci::Driver for NvmeDevice {
     type Data = Arc<NvmeData>;
 
-    define_pci_id_table! {
-        (),
-        [ (pci::DeviceId::with_class(bindings::PCI_CLASS_STORAGE_EXPRESS, 0xffffff), None) ]
-    }
+    type IdInfo = ();
 
-    fn probe(pci_dev: &mut pci::Device, _id: Option<&Self::IdInfo>) -> Result<Arc<NvmeData>> {
+    const ID_TABLE: &'static dyn kernel::device_id::IdTable<pci::DeviceId, ()> =
+        &kernel::device_id::IdArray::new([(
+            pci::DeviceId::with_class(bindings::PCI_CLASS_STORAGE_EXPRESS, 0xffffff),
+            (),
+        )]);
+
+    fn probe(pci_dev: &mut pci::Device, &(): &Self::IdInfo) -> Result<Arc<NvmeData>> {
         pr_info!("probe called!\n");
 
         // TODO: We need to disable the device on error.
