@@ -2,11 +2,23 @@
 
 //! A container that can be initialized at most once.
 
-use super::atomic::{
-    ordering::{Acquire, Relaxed, Release},
-    Atomic,
+use core::{
+    cell::UnsafeCell,
+    mem::MaybeUninit, //
 };
-use core::{cell::UnsafeCell, mem::MaybeUninit};
+use pin_init::{
+    Init,
+    PinInit, //
+};
+
+use super::atomic::{
+    ordering::{
+        Acquire,
+        Release, //
+    },
+    Atomic, //
+};
+use crate::prelude::*;
 
 /// A container that can be populated at most once. Thread safe.
 ///
@@ -15,13 +27,13 @@ use core::{cell::UnsafeCell, mem::MaybeUninit};
 ///
 /// # Invariants
 ///
-/// - `init` may only increase in value.
 /// - `init` may only assume values in the range `0..=2`.
 /// - `init == 0` if and only if `value` is uninitialized.
 /// - `init == 1` if and only if there is exactly one thread with exclusive
 ///   access to `self.value`.
 /// - `init == 2` if and only if `value` is initialized and valid for shared
 ///   access.
+/// - once `init == 2`, it must remain so.
 ///
 /// # Example
 ///
@@ -51,6 +63,35 @@ impl<T> Default for SetOnce<T> {
     }
 }
 
+/// Error that can occur during initialization of `SetOnce`.
+#[derive(Debug)]
+pub enum InitError<E> {
+    /// The `Once` has already been initialized.
+    AlreadyInit,
+    /// The `Once` is being raced to initialize by another thread.
+    RacedInit,
+    /// Error occurs during initialization.
+    DuringInit(E),
+}
+
+impl<E> From<E> for InitError<E> {
+    #[inline]
+    fn from(err: E) -> Self {
+        InitError::DuringInit(err)
+    }
+}
+
+impl<E: Into<Error>> From<InitError<E>> for Error {
+    #[inline]
+    fn from(this: InitError<E>) -> Self {
+        match this {
+            InitError::AlreadyInit => EEXIST,
+            InitError::RacedInit => EBUSY,
+            InitError::DuringInit(e) => e.into(),
+        }
+    }
+}
+
 impl<T> SetOnce<T> {
     /// Create a new [`SetOnce`].
     ///
@@ -76,29 +117,65 @@ impl<T> SetOnce<T> {
         }
     }
 
+    /// Populate the [`SetOnce`] with an initializer.
+    ///
+    /// Returns the initialized reference if the [`SetOnce`] was successfully populated.
+    pub fn init<E>(&self, init: impl Init<T, E>) -> Result<&T, InitError<E>> {
+        // INVARIANT: If the swap succeeds:
+        //  - We write the valid value `1` to `init`.
+        //  - The previous value is not `2`, so it is valid to move to `1`.
+        //  - Only one thread can succeed in this write, so we have exclusive access after the
+        //    write.
+        match self.init.cmpxchg(0, 1, Acquire) {
+            Ok(_) => {
+                // SAFETY:
+                // - By the type invariants of `Self`, the fact that we succeeded in writing `1`
+                //   to `self.init` means we obtained exclusive access to `self.value`.
+                // - When `Err` is returned, we did not set `self.init` to `2` so the `Drop` is not
+                //   armed.
+                match unsafe { init.__init(self.value.get().cast()) } {
+                    Ok(()) => {
+                        // INVARIANT:
+                        //  - The previous value is `1`, so it is valid to move to `2`.
+                        //  - We write the valid value `2` to `init`.
+                        //  - We release our exclusive access to `self.value` and it is now valid for shared
+                        //    access.
+                        self.init.store(2, Release);
+                        // SAFETY: we have just initialized the value.
+                        Ok(unsafe { &*self.value.get().cast() })
+                    }
+                    Err(err) => {
+                        // INVARIANT:
+                        //  - The previous value is `1`, so it is valid to move to `0`.
+                        //  - We write the valid value `0` to `init`.
+                        //  - We release our exclusive access to `self.value` and it is now valid for shared
+                        //    access.
+                        self.init.store(0, Release);
+                        Err(err.into())
+                    }
+                }
+            }
+            Err(1) => Err(InitError::RacedInit),
+            Err(_) => Err(InitError::AlreadyInit),
+        }
+    }
+
+    /// Populate the [`SetOnce`] with a pinned initializer.
+    ///
+    /// Returns the initialized reference if the [`SetOnce`] was successfully populated.
+    pub fn pin_init<E>(self: Pin<&Self>, init: impl PinInit<T, E>) -> Result<&T, InitError<E>> {
+        // SAFETY:
+        // - `__pinned_init` satisfy all requirements of `init_from_closure`
+        // - calling `__pinned_init` require additional that the slot is pinned, which is satisfied given `self: Pin<&Self>`.
+        self.get_ref()
+            .init(unsafe { pin_init::init_from_closure(|slot| init.__pinned_init(slot)) })
+    }
+
     /// Populate the [`SetOnce`].
     ///
     /// Returns `true` if the [`SetOnce`] was successfully populated.
     pub fn populate(&self, value: T) -> bool {
-        // INVARIANT: If the swap succeeds:
-        //  - We increase `init`.
-        //  - We write the valid value `1` to `init`.
-        //  - Only one thread can succeed in this write, so we have exclusive access after the
-        //    write.
-        if let Ok(0) = self.init.cmpxchg(0, 1, Relaxed) {
-            // SAFETY: By the type invariants of `Self`, the fact that we succeeded in writing `1`
-            // to `self.init` means we obtained exclusive access to `self.value`.
-            unsafe { core::ptr::write(self.value.get().cast(), value) };
-            // INVARIANT:
-            //  - We increase `init`.
-            //  - We write the valid value `2` to `init`.
-            //  - We release our exclusive access to `self.value` and it is now valid for shared
-            //    access.
-            self.init.store(2, Release);
-            true
-        } else {
-            false
-        }
+        self.init(value).is_ok()
     }
 
     /// Get a copy of the contained object.
