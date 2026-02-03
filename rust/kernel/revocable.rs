@@ -7,7 +7,12 @@
 
 use pin_init::Wrapper;
 
-use crate::{bindings, prelude::*, sync::rcu, types::Opaque};
+use crate::{
+    bindings,
+    prelude::*,
+    sync::{rcu, SetOnce},
+    types::Opaque,
+};
 use core::{
     marker::PhantomData,
     ops::Deref,
@@ -259,5 +264,72 @@ impl<T> Deref for RevocableGuard<'_, T> {
         // SAFETY: By the type invariants, we hold the rcu read-side lock, so the object is
         // guaranteed to remain valid.
         unsafe { &*self.data_ref }
+    }
+}
+
+/// A handle to perform revocation on a [`Revocable`].
+///
+/// The associated `Revocable` is revoked when the handle is dropped.
+pub struct RevokeHandle<'a, T>(&'a Revocable<T>);
+
+impl<'a, T> RevokeHandle<'a, T> {
+    /// Create a revoke-on-drop handle on an existing revocable.
+    pub fn new(revocable: &'a Revocable<T>) -> Self {
+        Self(revocable)
+    }
+
+    /// Dismiss the handle.
+    ///
+    /// This method consumes ownership without revoking the `Revocable`.
+    pub fn dismiss(self) {
+        core::mem::forget(self);
+    }
+}
+
+impl<'a, T> Drop for RevokeHandle<'a, T> {
+    fn drop(&mut self) {
+        self.0.revoke();
+    }
+}
+
+/// An object that is initialized and can become inaccessible at runtime.
+///
+/// [`Revocable`] is initialized at the beginning, and can be made inaccessible at runtime.
+/// `LazyRevocable` is uninitialized at the beginning, and can be initialized later; it can be
+/// revoked in a similar manner to [`Revocable`]. Once revoked, it cannot be initialized again.
+#[pin_data]
+pub struct LazyRevocable<T> {
+    #[pin]
+    once: SetOnce<Revocable<T>>,
+}
+
+impl<T> LazyRevocable<T> {
+    /// Creates a new lazy revocable instance.
+    ///
+    /// The instance starts uninitialized, where all accesses would fail.
+    pub const fn new() -> Self {
+        LazyRevocable {
+            once: SetOnce::new(),
+        }
+    }
+
+    /// Initialize a `LazyRevocable` and obtain a handle to revoke the content if successful.
+    ///
+    /// An error would be returned if the revocable has already been initialized.
+    pub fn init<E: Into<Error>>(
+        self: Pin<&Self>,
+        init: impl PinInit<T, E>,
+    ) -> Result<RevokeHandle<'_, T>> {
+        // SAFETY: `once` is structurally pinned.
+        let once = unsafe { self.map_unchecked(|x| &x.once) };
+        let revocable = once.pin_init(Revocable::new(init))?;
+        Ok(RevokeHandle::new(revocable))
+    }
+
+    /// Tries to access the revocable wrapped object.
+    ///
+    /// Returns `None` if the object has not been initialized, or it has been revoked and is therefore no longer accessible.
+    pub fn try_access(&self) -> Option<RevocableGuard<'_, T>> {
+        self.once.as_ref()?.try_access()
     }
 }
