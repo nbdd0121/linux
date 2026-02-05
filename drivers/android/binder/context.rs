@@ -5,28 +5,36 @@
 use kernel::{
     alloc::kvec::KVVec,
     error::code::*,
+    new_mutex,
     prelude::*,
     security,
     str::{CStr, CString},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, SetOnce},
     task::Kuid,
 };
 
 use crate::{error::BinderError, node::NodeRef, process::Process};
 
-kernel::sync::global_lock! {
-    // SAFETY: We call `init` in the module initializer, so it's initialized before first use.
-    pub(crate) unsafe(uninit) static CONTEXTS: Mutex<ContextList> = ContextList {
-        contexts: KVVec::new(),
-    };
-}
+pub(crate) static CONTEXTS: SetOnce<Mutex<ContextList>> = SetOnce::new();
 
 pub(crate) struct ContextList {
     contexts: KVVec<Arc<Context>>,
 }
 
+pub(crate) fn init_contexts() {
+    Pin::static_ref(&crate::context::CONTEXTS)
+        .pin_init(new_mutex!(crate::context::ContextList {
+            contexts: KVVec::new(),
+        }))
+        .expect("Only called from module_init");
+}
+
+pub(crate) fn contexts() -> &'static Mutex<ContextList> {
+    CONTEXTS.as_ref().expect("initialized during module init")
+}
+
 pub(crate) fn get_all_contexts() -> Result<KVVec<Arc<Context>>> {
-    let lock = CONTEXTS.lock();
+    let lock = contexts().lock();
     let mut ctxs = KVVec::with_capacity(lock.contexts.len(), GFP_KERNEL)?;
     for ctx in lock.contexts.iter() {
         ctxs.push(ctx.clone(), GFP_KERNEL)?;
@@ -65,7 +73,7 @@ impl Context {
             GFP_KERNEL,
         )?;
 
-        CONTEXTS.lock().contexts.push(ctx.clone(), GFP_KERNEL)?;
+        contexts().lock().contexts.push(ctx.clone(), GFP_KERNEL)?;
 
         Ok(ctx)
     }
@@ -75,7 +83,7 @@ impl Context {
     /// No-op if called twice.
     pub(crate) fn deregister(self: &Arc<Self>) {
         // Safe removal using retain
-        CONTEXTS.lock().contexts.retain(|c| !Arc::ptr_eq(c, self));
+        contexts().lock().contexts.retain(|c| !Arc::ptr_eq(c, self));
     }
 
     pub(crate) fn register_process(self: &Arc<Self>, proc: Arc<Process>) -> Result {
