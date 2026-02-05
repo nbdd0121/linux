@@ -289,8 +289,7 @@ struct BinderModule {}
 
 impl kernel::Module for BinderModule {
     fn init(_module: &'static kernel::ThisModule) -> Result<Self> {
-        // SAFETY: The module initializer never runs twice, so we only call this once.
-        unsafe { crate::context::CONTEXTS.init() };
+        crate::context::init_contexts();
 
         pr_warn!("Loaded Rust Binder.");
 
