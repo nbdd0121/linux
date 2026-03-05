@@ -1,0 +1,740 @@
+// SPDX-License-Identifier: GPL-2.0
+
+//! Memory-mapped IO.
+//!
+//! C header: [`include/asm-generic/io.h`](srctree/include/asm-generic/io.h)
+
+use crate::{
+    bindings,
+    prelude::*,
+    ptr::KnownSize,
+    transmute::{
+        AsBytes,
+        FromBytes, //
+    }, //
+};
+
+pub mod mem;
+pub mod poll;
+pub mod resource;
+
+pub use resource::Resource;
+
+/// Physical address type.
+///
+/// This is a type alias to either `u32` or `u64` depending on the config option
+/// `CONFIG_PHYS_ADDR_T_64BIT`, and it can be a u64 even on 32-bit architectures.
+pub type PhysAddr = bindings::phys_addr_t;
+
+/// Resource Size type.
+///
+/// This is a type alias to either `u32` or `u64` depending on the config option
+/// `CONFIG_PHYS_ADDR_T_64BIT`, and it can be a u64 even on 32-bit architectures.
+pub type ResourceSize = bindings::resource_size_t;
+
+/// Untyped I/O region.
+///
+/// This type can be used when a I/O region without known tpe information has a compile-time known
+/// minimum size (and a runtime known actual size).
+///
+/// The `SIZE` generics indicate the minimum size of the region.
+#[repr(transparent)]
+pub struct Region<const SIZE: usize = 0> {
+    inner: [u8],
+}
+
+impl<const SIZE: usize> KnownSize for Region<SIZE> {
+    const MIN_SIZE: usize = SIZE;
+
+    #[inline(always)]
+    fn size(p: *const Self) -> usize {
+        (p as *const [u8]).len()
+    }
+}
+
+/// Raw representation of an MMIO region.
+///
+/// `MmioRaw<T>` is equivalent to `T __iomem *` in C.
+///
+/// By itself, the existence of an instance of this structure does not provide any guarantees that
+/// the represented MMIO region does exist or is properly mapped.
+///
+/// Instead, the bus specific MMIO implementation must convert this raw representation into an
+/// `Mmio` instance providing the actual memory accessors. Only by the conversion into an `Mmio`
+/// structure any guarantees are given.
+pub struct MmioRaw<T: ?Sized> {
+    /// Pointer is in I/O address space.
+    ///
+    /// The provenance does not matter, only the address and metadata do.
+    addr: *mut T,
+}
+
+// SAFETY: `MmioRaw` is just an address, so is thread-safe.
+unsafe impl<T: ?Sized> Send for MmioRaw<T> {}
+// SAFETY: `MmioRaw` is just an address, so is thread-safe.
+unsafe impl<T: ?Sized> Sync for MmioRaw<T> {}
+
+impl<T> MmioRaw<T> {
+    /// Create a `MmioRaw` from address.
+    pub fn new(addr: usize) -> Self {
+        Self {
+            addr: core::ptr::without_provenance_mut(addr),
+        }
+    }
+}
+
+impl<const SIZE: usize> MmioRaw<Region<SIZE>> {
+    /// Create a `MmioRaw` representing a I/O region with given size.
+    ///
+    /// The size is checked against the minimum size specified via const generics.
+    pub fn new_region(addr: usize, maxsize: usize) -> Result<Self> {
+        if maxsize < SIZE {
+            return Err(EINVAL);
+        }
+
+        let addr = core::ptr::slice_from_raw_parts_mut::<u8>(
+            core::ptr::without_provenance_mut(addr),
+            maxsize,
+        ) as *mut Region<SIZE>;
+        Ok(Self { addr })
+    }
+}
+
+impl<T: ?Sized + KnownSize> MmioRaw<T> {
+    /// Returns the base address of the MMIO region.
+    #[inline]
+    pub fn as_ptr(&self) -> *mut T {
+        self.addr
+    }
+
+    /// Returns the size of the MMIO region.
+    #[inline]
+    pub fn size(&self) -> usize {
+        KnownSize::size(self.addr)
+    }
+}
+
+/// IO-mapped memory region.
+///
+/// The creator (usually a subsystem / bus such as PCI) is responsible for creating the
+/// mapping, performing an additional region request etc.
+///
+/// # Invariant
+///
+/// `addr` is the start and `maxsize` the length of valid I/O mapped memory region of size
+/// `maxsize`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kernel::{
+///     bindings,
+///     ffi::c_void,
+///     io::{
+///         Io,
+///         IoKnownSize,
+///         Mmio,
+///         MmioRaw,
+///         PhysAddr,
+///         Region,
+///     },
+/// };
+/// use core::ops::Deref;
+///
+/// // See also `pci::Bar` for a real example.
+/// struct IoMem<const SIZE: usize>(MmioRaw<Region<SIZE>>);
+///
+/// impl<const SIZE: usize> IoMem<SIZE> {
+///     /// # Safety
+///     ///
+///     /// [`paddr`, `paddr` + `SIZE`) must be a valid MMIO region that is mappable into the CPUs
+///     /// virtual address space.
+///     unsafe fn new(paddr: usize) -> Result<Self>{
+///         // SAFETY: By the safety requirements of this function [`paddr`, `paddr` + `SIZE`) is
+///         // valid for `ioremap`.
+///         let addr = unsafe { bindings::ioremap(paddr as PhysAddr, SIZE) };
+///         if addr.is_null() {
+///             return Err(ENOMEM);
+///         }
+///
+///         Ok(IoMem(MmioRaw::new_region(addr as usize, SIZE)?))
+///     }
+/// }
+///
+/// impl<const SIZE: usize> Drop for IoMem<SIZE> {
+///     fn drop(&mut self) {
+///         // SAFETY: `self.0.addr()` is guaranteed to be properly mapped by `Self::new`.
+///         unsafe { bindings::iounmap(self.0.as_ptr().cast()); };
+///     }
+/// }
+///
+/// impl<const SIZE: usize> Deref for IoMem<SIZE> {
+///    type Target = Mmio<Region<SIZE>>;
+///
+///    fn deref(&self) -> &Self::Target {
+///         // SAFETY: The memory range stored in `self` has been properly mapped in `Self::new`.
+///         unsafe { Mmio::from_raw(&self.0) }
+///    }
+/// }
+///
+///# fn no_run() -> Result<(), Error> {
+/// // SAFETY: Invalid usage for example purposes.
+/// let iomem = unsafe { IoMem::<{ core::mem::size_of::<u32>() }>::new(0xBAAAAAAD)? };
+/// iomem.write32(0x42, 0x0);
+/// assert!(iomem.try_write32(0x42, 0x0).is_ok());
+/// assert!(iomem.try_write32(0x42, 0x4).is_err());
+/// # Ok(())
+/// # }
+/// ```
+#[repr(transparent)]
+pub struct Mmio<T: ?Sized>(MmioRaw<T>);
+
+/// Checks whether an access of type `U` at the given `offset`
+/// is valid within this region.
+#[inline]
+const fn offset_valid<U>(offset: usize, size: usize) -> bool {
+    let type_size = core::mem::size_of::<U>();
+    if let Some(end) = offset.checked_add(type_size) {
+        end <= size && offset % type_size == 0
+    } else {
+        false
+    }
+}
+
+/// Trait indicating that an I/O backend supports operations of a certain type and providing an
+/// implementation for these operations.
+///
+/// Different I/O backends can implement this trait to expose only the operations they support.
+///
+/// For example, a PCI configuration space may implement `IoCapable<u8>`, `IoCapable<u16>`,
+/// and `IoCapable<u32>`, but not `IoCapable<u64>`, while an MMIO region on a 64-bit
+/// system might implement all four.
+pub trait IoCapable<T> {
+    /// Performs an I/O read of type `T` at `address` and returns the result.
+    ///
+    /// # Safety
+    ///
+    /// The range `[address..address + size_of::<T>()]` must be within the bounds of `Self`.
+    unsafe fn io_read(&self, address: *mut T) -> T;
+
+    /// Performs an I/O write of `value` at `address`.
+    ///
+    /// # Safety
+    ///
+    /// The range `[address..address + size_of::<T>()]` must be within the bounds of `Self`.
+    unsafe fn io_write(&self, value: T, address: *mut T);
+}
+
+/// Types implementing this trait (e.g. MMIO BARs or PCI config regions)
+/// can perform I/O operations on regions of memory.
+///
+/// This is an abstract representation to be implemented by arbitrary I/O
+/// backends (e.g. MMIO, PCI config space, etc.).
+///
+/// The [`Io`] trait provides:
+/// - Base address and size information
+/// - Helper methods for offset validation and address calculation
+/// - Fallible (runtime checked) accessors for different data widths
+///
+/// Which I/O methods are available depends on which [`IoCapable<T>`] traits
+/// are implemented for the type.
+///
+/// # Examples
+///
+/// For MMIO regions, all widths (u8, u16, u32, and u64 on 64-bit systems) are typically
+/// supported. For PCI configuration space, u8, u16, and u32 are supported but u64 is not.
+pub trait Io {
+    /// Type of this I/O region. For untyped I/O regions, [`Region`] type can be used.
+    type Type: ?Sized + KnownSize;
+
+    /// Returns the base pointer of this mapping.
+    ///
+    /// This is a pointer to capture metadata. The specific meaning of the pointer depends on
+    /// I/O backend and is not necessarily valid.
+    fn as_ptr(&self) -> *mut Self::Type;
+
+    /// Get the underlying ttype that is `Io`.
+    ///
+    /// This is only used by `io_project!` macro to make use of deref coercion.
+    #[doc(hidden)]
+    #[inline(always)]
+    fn as_io_self(&self) -> &Self {
+        self
+    }
+
+    /// Returns the absolute I/O address for a given `offset`,
+    /// performing compile-time bound checks.
+    // Always inline to optimize out error path of `build_assert`.
+    #[inline(always)]
+    fn io_addr_assert<U>(&self, offset: usize) -> *mut U {
+        build_assert!(offset_valid::<U>(offset, Self::Type::MIN_SIZE));
+
+        self.as_ptr().wrapping_byte_add(offset).cast()
+    }
+
+    /// Returns the absolute I/O address for a given `offset`,
+    /// performing runtime bound checks.
+    #[inline]
+    fn io_addr<U>(&self, offset: usize) -> Result<*mut U> {
+        let ptr = self.as_ptr();
+        if !offset_valid::<U>(offset, Self::Type::size(ptr)) {
+            return Err(EINVAL);
+        }
+
+        Ok(self.as_ptr().wrapping_byte_add(offset).cast())
+    }
+
+    /// Fallible 8-bit read with runtime bounds check.
+    #[inline(always)]
+    fn try_read8(&self, offset: usize) -> Result<u8>
+    where
+        Self: IoCapable<u8>,
+    {
+        let address = self.io_addr::<u8>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        Ok(unsafe { self.io_read(address) })
+    }
+
+    /// Fallible 16-bit read with runtime bounds check.
+    #[inline(always)]
+    fn try_read16(&self, offset: usize) -> Result<u16>
+    where
+        Self: IoCapable<u16>,
+    {
+        let address = self.io_addr::<u16>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        Ok(unsafe { self.io_read(address) })
+    }
+
+    /// Fallible 32-bit read with runtime bounds check.
+    #[inline(always)]
+    fn try_read32(&self, offset: usize) -> Result<u32>
+    where
+        Self: IoCapable<u32>,
+    {
+        let address = self.io_addr::<u32>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        Ok(unsafe { self.io_read(address) })
+    }
+
+    /// Fallible 64-bit read with runtime bounds check.
+    #[inline(always)]
+    fn try_read64(&self, offset: usize) -> Result<u64>
+    where
+        Self: IoCapable<u64>,
+    {
+        let address = self.io_addr::<u64>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        Ok(unsafe { self.io_read(address) })
+    }
+
+    /// Fallible 8-bit write with runtime bounds check.
+    #[inline(always)]
+    fn try_write8(&self, value: u8, offset: usize) -> Result
+    where
+        Self: IoCapable<u8>,
+    {
+        let address = self.io_addr::<u8>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        unsafe { self.io_write(value, address) };
+        Ok(())
+    }
+
+    /// Fallible 16-bit write with runtime bounds check.
+    #[inline(always)]
+    fn try_write16(&self, value: u16, offset: usize) -> Result
+    where
+        Self: IoCapable<u16>,
+    {
+        let address = self.io_addr::<u16>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        unsafe { self.io_write(value, address) };
+        Ok(())
+    }
+
+    /// Fallible 32-bit write with runtime bounds check.
+    #[inline(always)]
+    fn try_write32(&self, value: u32, offset: usize) -> Result
+    where
+        Self: IoCapable<u32>,
+    {
+        let address = self.io_addr::<u32>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        unsafe { self.io_write(value, address) };
+        Ok(())
+    }
+
+    /// Fallible 64-bit write with runtime bounds check.
+    #[inline(always)]
+    fn try_write64(&self, value: u64, offset: usize) -> Result
+    where
+        Self: IoCapable<u64>,
+    {
+        let address = self.io_addr::<u64>(offset)?;
+
+        // SAFETY: `address` has been validated by `io_addr`.
+        unsafe { self.io_write(value, address) };
+        Ok(())
+    }
+
+    /// Infallible 8-bit read with compile-time bounds check.
+    #[inline(always)]
+    fn read8(&self, offset: usize) -> u8
+    where
+        Self: IoCapable<u8>,
+    {
+        let address = self.io_addr_assert::<u8>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_read(address) }
+    }
+
+    /// Infallible 16-bit read with compile-time bounds check.
+    #[inline(always)]
+    fn read16(&self, offset: usize) -> u16
+    where
+        Self: IoCapable<u16>,
+    {
+        let address = self.io_addr_assert::<u16>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_read(address) }
+    }
+
+    /// Infallible 32-bit read with compile-time bounds check.
+    #[inline(always)]
+    fn read32(&self, offset: usize) -> u32
+    where
+        Self: IoCapable<u32>,
+    {
+        let address = self.io_addr_assert::<u32>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_read(address) }
+    }
+
+    /// Infallible 64-bit read with compile-time bounds check.
+    #[inline(always)]
+    fn read64(&self, offset: usize) -> u64
+    where
+        Self: IoCapable<u64>,
+    {
+        let address = self.io_addr_assert::<u64>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_read(address) }
+    }
+
+    /// Infallible 8-bit write with compile-time bounds check.
+    #[inline(always)]
+    fn write8(&self, value: u8, offset: usize)
+    where
+        Self: IoCapable<u8>,
+    {
+        let address = self.io_addr_assert::<u8>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_write(value, address) }
+    }
+
+    /// Infallible 16-bit write with compile-time bounds check.
+    #[inline(always)]
+    fn write16(&self, value: u16, offset: usize)
+    where
+        Self: IoCapable<u16>,
+    {
+        let address = self.io_addr_assert::<u16>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_write(value, address) }
+    }
+
+    /// Infallible 32-bit write with compile-time bounds check.
+    #[inline(always)]
+    fn write32(&self, value: u32, offset: usize)
+    where
+        Self: IoCapable<u32>,
+    {
+        let address = self.io_addr_assert::<u32>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_write(value, address) }
+    }
+
+    /// Infallible 64-bit write with compile-time bounds check.
+    #[inline(always)]
+    fn write64(&self, value: u64, offset: usize)
+    where
+        Self: IoCapable<u64>,
+    {
+        let address = self.io_addr_assert::<u64>(offset);
+
+        // SAFETY: `address` has been validated by `io_addr_assert`.
+        unsafe { self.io_write(value, address) }
+    }
+}
+
+// For compatibility only.
+#[doc(hidden)]
+pub trait IoKnownSize: Io {}
+
+impl<T: Io> IoKnownSize for T {}
+
+/// Implements [`IoCapable`] on `$mmio` for `$ty` using `$read_fn` and `$write_fn`.
+macro_rules! impl_mmio_io_capable {
+    ($mmio:ident, $(#[$attr:meta])* $ty:ty, $read_fn:ident, $write_fn:ident) => {
+        $(#[$attr])*
+        impl<T: ?Sized> IoCapable<$ty> for $mmio<T> {
+            unsafe fn io_read(&self, address: *mut $ty) -> $ty {
+                // SAFETY: By the trait invariant `address` is a valid address for MMIO operations.
+                unsafe { bindings::$read_fn(address as *const c_void) }
+            }
+
+            unsafe fn io_write(&self, value: $ty, address: *mut $ty) {
+                // SAFETY: By the trait invariant `address` is a valid address for MMIO operations.
+                unsafe { bindings::$write_fn(value, address.cast()) }
+            }
+        }
+    };
+}
+
+// MMIO regions support 8, 16, and 32-bit accesses.
+impl_mmio_io_capable!(Mmio, u8, readb, writeb);
+impl_mmio_io_capable!(Mmio, u16, readw, writew);
+impl_mmio_io_capable!(Mmio, u32, readl, writel);
+// MMIO regions on 64-bit systems also support 64-bit accesses.
+impl_mmio_io_capable!(
+    Mmio,
+    #[cfg(CONFIG_64BIT)]
+    u64,
+    readq,
+    writeq
+);
+
+impl<T: ?Sized + KnownSize> Io for Mmio<T> {
+    type Type = T;
+
+    /// Returns the base address of this mapping.
+    #[inline]
+    fn as_ptr(&self) -> *mut T {
+        self.0.as_ptr()
+    }
+}
+
+impl<T: ?Sized + KnownSize> Mmio<T> {
+    /// Converts an `MmioRaw` into an `Mmio` instance, providing the accessors to the MMIO mapping.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `addr` is the start of a valid I/O mapped memory region of size
+    /// `addr.size()`.
+    pub unsafe fn from_raw(raw: &MmioRaw<T>) -> &Self {
+        // SAFETY: `Mmio` is a transparent wrapper around `MmioRaw`.
+        unsafe { &*core::ptr::from_ref(raw).cast() }
+    }
+}
+
+/// [`Mmio`] wrapper using relaxed accessors.
+///
+/// This type provides an implementation of [`Io`] that uses relaxed I/O MMIO operands instead of
+/// the regular ones.
+///
+/// See [`Mmio::relaxed`] for a usage example.
+#[repr(transparent)]
+pub struct RelaxedMmio<T: ?Sized>(Mmio<T>);
+
+impl<T: ?Sized + KnownSize> Io for RelaxedMmio<T> {
+    type Type = T;
+
+    #[inline]
+    fn as_ptr(&self) -> *mut T {
+        self.0.as_ptr()
+    }
+}
+
+impl<T: ?Sized> Mmio<T> {
+    /// Returns a [`RelaxedMmio`] reference that performs relaxed I/O operations.
+    ///
+    /// Relaxed accessors do not provide ordering guarantees with respect to DMA or memory accesses
+    /// and can be used when such ordering is not required.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use kernel::io::{Io, Mmio, Region, RelaxedMmio};
+    ///
+    /// fn do_io(io: &Mmio<Region<0x100>>) {
+    ///     // The access is performed using `readl_relaxed` instead of `readl`.
+    ///     let v = io.relaxed().read32(0x10);
+    /// }
+    ///
+    /// ```
+    pub fn relaxed(&self) -> &RelaxedMmio<T> {
+        // SAFETY: `RelaxedMmio` is `#[repr(transparent)]` over `Mmio`, so `Mmio<T>` and
+        // `RelaxedMmio<T>` have identical layout.
+        unsafe { core::mem::transmute(self) }
+    }
+}
+
+// MMIO regions support 8, 16, and 32-bit accesses.
+impl_mmio_io_capable!(RelaxedMmio, u8, readb_relaxed, writeb_relaxed);
+impl_mmio_io_capable!(RelaxedMmio, u16, readw_relaxed, writew_relaxed);
+impl_mmio_io_capable!(RelaxedMmio, u32, readl_relaxed, writel_relaxed);
+// MMIO regions on 64-bit systems also support 64-bit accesses.
+impl_mmio_io_capable!(
+    RelaxedMmio,
+    #[cfg(CONFIG_64BIT)]
+    u64,
+    readq_relaxed,
+    writeq_relaxed
+);
+
+/// A view into an I/O region.
+///
+/// # Invariant
+///
+/// `ptr` must be aligned for `T` and the region it represents must be within `io`'s region.
+pub struct View<'a, IO, T: ?Sized> {
+    io: &'a IO,
+    ptr: *mut T,
+}
+
+impl<'a, IO, T: ?Sized> View<'a, IO, T> {
+    /// Create a view of a provided I/O region.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be aligned and the region it represents must be within `io`'s region.
+    #[inline]
+    pub unsafe fn new_unchecked(io: &'a IO, ptr: *mut T) -> Self {
+        // INVARIANT: per function safety requirement
+        Self { io, ptr }
+    }
+
+    /// Obtain the underlying I/O region.
+    #[inline]
+    pub fn io(self) -> &'a IO {
+        self.io
+    }
+
+    /// Obtain a pointer to the subview.
+    ///
+    /// The interpretation of the pointer depends on the underlying I/O region.
+    #[inline]
+    pub fn as_ptr(self) -> *mut T {
+        self.ptr
+    }
+}
+
+impl<IO, T: ?Sized> Clone for View<'_, IO, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<IO, T: ?Sized> Copy for View<'_, IO, T> {}
+
+impl<'a, IO, T: ?Sized> View<'a, IO, T> {
+    /// Try to convert this view into a different typed I/O view.
+    ///
+    /// The target type must be of same or smaller size to current type, and of same or smaller
+    /// alignment requirement.
+    pub fn try_cast<U>(self) -> Result<View<'a, IO, U>>
+    where
+        T: KnownSize + FromBytes + AsBytes,
+        U: FromBytes + AsBytes,
+    {
+        if size_of::<U>() > KnownSize::size(self.ptr) {
+            return Err(EINVAL);
+        }
+
+        if self.ptr.addr() % align_of::<U>() != 0 {
+            return Err(EINVAL);
+        }
+
+        // INVARIANT: we have checked bounds and alignment.
+        Ok(View {
+            io: self.io,
+            ptr: self.ptr.cast(),
+        })
+    }
+}
+
+impl<T, IO: Io + IoCapable<T>> View<'_, IO, T> {
+    /// Read from I/O memory.
+    #[inline]
+    pub fn read(&self) -> T {
+        // SAFETY: per type invariant
+        unsafe { self.io.io_read(self.ptr) }
+    }
+
+    /// Write to I/O memory.
+    #[inline]
+    pub fn write(&self, value: T) {
+        // SAFETY: per type invariant
+        unsafe { self.io.io_write(value, self.ptr) }
+    }
+}
+
+/// Project an I/O type to a subview of it.
+///
+/// The syntax is of form `kernel::io_project!(io, proj)` where `io` is an expression to a type that
+/// implements [`Io`] and `proj` is a [projection specification](kernel::project_pointer!).
+#[macro_export]
+macro_rules! io_project {
+    ($io:expr, $($proj:tt)*) => {{
+        use $crate::io::Io as _;
+
+        // Use a method so that `$io` can also be types that deref to types implementing `Io`, not
+        // only types that are themselves `Io`.
+        let io = $io.as_io_self();
+        let ptr = $crate::project_pointer!(
+            mut $crate::io::Io::as_ptr(io), $($proj)*
+        );
+        // SAFETY: pointer created by projection is within the I/O region.
+        unsafe { $crate::io::View::new_unchecked(io, ptr) }
+    }};
+}
+
+/// Read from I/O memory.
+///
+/// The syntax is of form `kernel::io_read!(io, proj)` where `io` is an expression to a type that
+/// implements [`Io`] and `proj` is a [projection specification](kernel::project_pointer!).
+#[macro_export]
+macro_rules! io_read {
+    ($io:expr, $($proj:tt)*) => {
+        $crate::io_project!($io, $($proj)*).read()
+    };
+}
+
+/// Writes to I/O mmeory.
+///
+/// The syntax is of form `kernel::io_write!(io, proj, val)` where  `io` is an expression to a type that
+/// implements [`Io`] and `proj` is a [projection specification](kernel::project_pointer!),
+/// and `val` is the value to be written to the projected location.
+#[macro_export]
+macro_rules! io_write {
+    (@parse [$io:expr] [$($proj:tt)*] [, $val:expr]) => {
+        $crate::io_project!($io, $($proj)*).write($val)
+    };
+    (@parse [$io:expr] [$($proj:tt)*] [.$field:tt $($rest:tt)*]) => {
+        $crate::io_write!(@parse [$io] [$($proj)* .$field] [$($rest)*])
+    };
+    (@parse [$io:expr] [$($proj:tt)*] [[$index:expr]? $($rest:tt)*]) => {
+        $crate::io_write!(@parse [$io] [$($proj)* [$index]?] [$($rest)*])
+    };
+    (@parse [$io:expr] [$($proj:tt)*] [[$index:expr] $($rest:tt)*]) => {
+        $crate::io_write!(@parse [$io] [$($proj)* [$index]] [$($rest)*])
+    };
+    ($io:expr, $($rest:tt)*) => {
+        $crate::io_write!(@parse [$io] [] [$($rest)*])
+    };
+}

@@ -1,0 +1,698 @@
+// SPDX-License-Identifier: GPL-2.0
+
+//! Direct memory access (DMA).
+//!
+//! C header: [`include/linux/dma-mapping.h`](srctree/include/linux/dma-mapping.h)
+
+use crate::{
+    bindings,
+    device,
+    device::{Bound, Core},
+    error::{
+        to_result,
+        Result, //
+    },
+    io::{
+        Io,
+        IoCapable, //
+    },
+    prelude::*,
+    ptr::KnownSize,
+    sync::aref::ARef,
+    transmute::{
+        AsBytes,
+        FromBytes, //
+    }, //
+};
+use core::ptr::NonNull;
+
+/// DMA address type.
+///
+/// Represents a bus address used for Direct Memory Access (DMA) operations.
+///
+/// This is an alias of the kernel's `dma_addr_t`, which may be `u32` or `u64` depending on
+/// `CONFIG_ARCH_DMA_ADDR_T_64BIT`.
+///
+/// Note that this may be `u64` even on 32-bit architectures.
+pub type DmaAddress = bindings::dma_addr_t;
+
+/// Trait to be implemented by DMA capable bus devices.
+///
+/// The [`dma::Device`](Device) trait should be implemented by bus specific device representations,
+/// where the underlying bus is DMA capable, such as:
+#[cfg_attr(CONFIG_PCI, doc = "* [`pci::Device`](kernel::pci::Device)")]
+/// * [`platform::Device`](::kernel::platform::Device)
+pub trait Device: AsRef<device::Device<Core>> {
+    /// Set up the device's DMA streaming addressing capabilities.
+    ///
+    /// This method is usually called once from `probe()` as soon as the device capabilities are
+    /// known.
+    ///
+    /// # Safety
+    ///
+    /// This method must not be called concurrently with any DMA allocation or mapping primitives,
+    /// such as [`Coherent::zeroed`].
+    unsafe fn dma_set_mask(&self, mask: DmaMask) -> Result {
+        // SAFETY:
+        // - By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
+        // - The safety requirement of this function guarantees that there are no concurrent calls
+        //   to DMA allocation and mapping primitives using this mask.
+        to_result(unsafe { bindings::dma_set_mask(self.as_ref().as_raw(), mask.value()) })
+    }
+
+    /// Set up the device's DMA coherent addressing capabilities.
+    ///
+    /// This method is usually called once from `probe()` as soon as the device capabilities are
+    /// known.
+    ///
+    /// # Safety
+    ///
+    /// This method must not be called concurrently with any DMA allocation or mapping primitives,
+    /// such as [`Coherent::zeroed`].
+    unsafe fn dma_set_coherent_mask(&self, mask: DmaMask) -> Result {
+        // SAFETY:
+        // - By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
+        // - The safety requirement of this function guarantees that there are no concurrent calls
+        //   to DMA allocation and mapping primitives using this mask.
+        to_result(unsafe { bindings::dma_set_coherent_mask(self.as_ref().as_raw(), mask.value()) })
+    }
+
+    /// Set up the device's DMA addressing capabilities.
+    ///
+    /// This is a combination of [`Device::dma_set_mask`] and [`Device::dma_set_coherent_mask`].
+    ///
+    /// This method is usually called once from `probe()` as soon as the device capabilities are
+    /// known.
+    ///
+    /// # Safety
+    ///
+    /// This method must not be called concurrently with any DMA allocation or mapping primitives,
+    /// such as [`Coherent::zeroed`].
+    unsafe fn dma_set_mask_and_coherent(&self, mask: DmaMask) -> Result {
+        // SAFETY:
+        // - By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
+        // - The safety requirement of this function guarantees that there are no concurrent calls
+        //   to DMA allocation and mapping primitives using this mask.
+        to_result(unsafe {
+            bindings::dma_set_mask_and_coherent(self.as_ref().as_raw(), mask.value())
+        })
+    }
+
+    /// Set the maximum size of a single DMA segment the device may request.
+    ///
+    /// This method is usually called once from `probe()` as soon as the device capabilities are
+    /// known.
+    ///
+    /// # Safety
+    ///
+    /// This method must not be called concurrently with any DMA allocation or mapping primitives,
+    /// such as [`Coherent::zeroed`].
+    unsafe fn dma_set_max_seg_size(&self, size: u32) {
+        // SAFETY:
+        // - By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
+        // - The safety requirement of this function guarantees that there are no concurrent calls
+        //   to DMA allocation and mapping primitives using this parameter.
+        unsafe { bindings::dma_set_max_seg_size(self.as_ref().as_raw(), size) }
+    }
+}
+
+/// A DMA mask that holds a bitmask with the lowest `n` bits set.
+///
+/// Use [`DmaMask::new`] or [`DmaMask::try_new`] to construct a value. Values
+/// are guaranteed to never exceed the bit width of `u64`.
+///
+/// This is the Rust equivalent of the C macro `DMA_BIT_MASK()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaMask(u64);
+
+impl DmaMask {
+    /// Constructs a `DmaMask` with the lowest `n` bits set to `1`.
+    ///
+    /// For `n <= 64`, sets exactly the lowest `n` bits.
+    /// For `n > 64`, results in a build error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::dma::DmaMask;
+    ///
+    /// let mask0 = DmaMask::new::<0>();
+    /// assert_eq!(mask0.value(), 0);
+    ///
+    /// let mask1 = DmaMask::new::<1>();
+    /// assert_eq!(mask1.value(), 0b1);
+    ///
+    /// let mask64 = DmaMask::new::<64>();
+    /// assert_eq!(mask64.value(), u64::MAX);
+    ///
+    /// // Build failure.
+    /// // let mask_overflow = DmaMask::new::<100>();
+    /// ```
+    #[inline]
+    pub const fn new<const N: u32>() -> Self {
+        let Ok(mask) = Self::try_new(N) else {
+            build_error!("Invalid DMA Mask.");
+        };
+
+        mask
+    }
+
+    /// Constructs a `DmaMask` with the lowest `n` bits set to `1`.
+    ///
+    /// For `n <= 64`, sets exactly the lowest `n` bits.
+    /// For `n > 64`, returns [`EINVAL`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::dma::DmaMask;
+    ///
+    /// let mask0 = DmaMask::try_new(0)?;
+    /// assert_eq!(mask0.value(), 0);
+    ///
+    /// let mask1 = DmaMask::try_new(1)?;
+    /// assert_eq!(mask1.value(), 0b1);
+    ///
+    /// let mask64 = DmaMask::try_new(64)?;
+    /// assert_eq!(mask64.value(), u64::MAX);
+    ///
+    /// let mask_overflow = DmaMask::try_new(100);
+    /// assert!(mask_overflow.is_err());
+    /// # Ok::<(), Error>(())
+    /// ```
+    #[inline]
+    pub const fn try_new(n: u32) -> Result<Self> {
+        Ok(Self(match n {
+            0 => 0,
+            1..=64 => u64::MAX >> (64 - n),
+            _ => return Err(EINVAL),
+        }))
+    }
+
+    /// Returns the underlying `u64` bitmask value.
+    #[inline]
+    pub const fn value(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Possible attributes associated with a DMA mapping.
+///
+/// They can be combined with the operators `|`, `&`, and `!`.
+///
+/// Values can be used from the [`attrs`] module.
+///
+/// # Examples
+///
+/// ```
+/// # use kernel::device::{Bound, Device};
+/// use kernel::dma::{attrs::*, Coherent};
+///
+/// # fn test(dev: &Device<Bound>) -> Result {
+/// let attribs = DMA_ATTR_FORCE_CONTIGUOUS | DMA_ATTR_NO_WARN;
+/// let c: Coherent<[u64]> =
+///     Coherent::zeroed_slice_with_attrs(dev, 4, GFP_KERNEL, attribs)?;
+/// # Ok::<(), Error>(()) }
+/// ```
+#[derive(Clone, Copy, PartialEq)]
+#[repr(transparent)]
+pub struct Attrs(u32);
+
+impl Attrs {
+    /// Get the raw representation of this attribute.
+    pub(crate) fn as_raw(self) -> crate::ffi::c_ulong {
+        self.0 as crate::ffi::c_ulong
+    }
+
+    /// Check whether `flags` is contained in `self`.
+    pub fn contains(self, flags: Attrs) -> bool {
+        (self & flags) == flags
+    }
+}
+
+impl core::ops::BitOr for Attrs {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitAnd for Attrs {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl core::ops::Not for Attrs {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        Self(!self.0)
+    }
+}
+
+/// DMA mapping attributes.
+pub mod attrs {
+    use super::Attrs;
+
+    /// Specifies that reads and writes to the mapping may be weakly ordered, that is that reads
+    /// and writes may pass each other.
+    pub const DMA_ATTR_WEAK_ORDERING: Attrs = Attrs(bindings::DMA_ATTR_WEAK_ORDERING);
+
+    /// Specifies that writes to the mapping may be buffered to improve performance.
+    pub const DMA_ATTR_WRITE_COMBINE: Attrs = Attrs(bindings::DMA_ATTR_WRITE_COMBINE);
+
+    /// Lets the platform to avoid creating a kernel virtual mapping for the allocated buffer.
+    pub const DMA_ATTR_NO_KERNEL_MAPPING: Attrs = Attrs(bindings::DMA_ATTR_NO_KERNEL_MAPPING);
+
+    /// Allows platform code to skip synchronization of the CPU cache for the given buffer assuming
+    /// that it has been already transferred to 'device' domain.
+    pub const DMA_ATTR_SKIP_CPU_SYNC: Attrs = Attrs(bindings::DMA_ATTR_SKIP_CPU_SYNC);
+
+    /// Forces contiguous allocation of the buffer in physical memory.
+    pub const DMA_ATTR_FORCE_CONTIGUOUS: Attrs = Attrs(bindings::DMA_ATTR_FORCE_CONTIGUOUS);
+
+    /// Hints DMA-mapping subsystem that it's probably not worth the time to try
+    /// to allocate memory to in a way that gives better TLB efficiency.
+    pub const DMA_ATTR_ALLOC_SINGLE_PAGES: Attrs = Attrs(bindings::DMA_ATTR_ALLOC_SINGLE_PAGES);
+
+    /// This tells the DMA-mapping subsystem to suppress allocation failure reports (similarly to
+    /// `__GFP_NOWARN`).
+    pub const DMA_ATTR_NO_WARN: Attrs = Attrs(bindings::DMA_ATTR_NO_WARN);
+
+    /// Indicates that the buffer is fully accessible at an elevated privilege level (and
+    /// ideally inaccessible or at least read-only at lesser-privileged levels).
+    pub const DMA_ATTR_PRIVILEGED: Attrs = Attrs(bindings::DMA_ATTR_PRIVILEGED);
+
+    /// Indicates that the buffer is MMIO memory.
+    pub const DMA_ATTR_MMIO: Attrs = Attrs(bindings::DMA_ATTR_MMIO);
+}
+
+/// DMA data direction.
+///
+/// Corresponds to the C [`enum dma_data_direction`].
+///
+/// [`enum dma_data_direction`]: srctree/include/linux/dma-direction.h
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum DataDirection {
+    /// The DMA mapping is for bidirectional data transfer.
+    ///
+    /// This is used when the buffer can be both read from and written to by the device.
+    /// The cache for the corresponding memory region is both flushed and invalidated.
+    Bidirectional = Self::const_cast(bindings::dma_data_direction_DMA_BIDIRECTIONAL),
+
+    /// The DMA mapping is for data transfer from memory to the device (write).
+    ///
+    /// The CPU has prepared data in the buffer, and the device will read it.
+    /// The cache for the corresponding memory region is flushed before device access.
+    ToDevice = Self::const_cast(bindings::dma_data_direction_DMA_TO_DEVICE),
+
+    /// The DMA mapping is for data transfer from the device to memory (read).
+    ///
+    /// The device will write data into the buffer for the CPU to read.
+    /// The cache for the corresponding memory region is invalidated before CPU access.
+    FromDevice = Self::const_cast(bindings::dma_data_direction_DMA_FROM_DEVICE),
+
+    /// The DMA mapping is not for data transfer.
+    ///
+    /// This is primarily for debugging purposes. With this direction, the DMA mapping API
+    /// will not perform any cache coherency operations.
+    None = Self::const_cast(bindings::dma_data_direction_DMA_NONE),
+}
+
+impl DataDirection {
+    /// Casts the bindgen-generated enum type to a `u32` at compile time.
+    ///
+    /// This function will cause a compile-time error if the underlying value of the
+    /// C enum is out of bounds for `u32`.
+    const fn const_cast(val: bindings::dma_data_direction) -> u32 {
+        // CAST: The C standard allows compilers to choose different integer types for enums.
+        // To safely check the value, we cast it to a wide signed integer type (`i128`)
+        // which can hold any standard C integer enum type without truncation.
+        let wide_val = val as i128;
+
+        // Check if the value is outside the valid range for the target type `u32`.
+        // CAST: `u32::MAX` is cast to `i128` to match the type of `wide_val` for the comparison.
+        if wide_val < 0 || wide_val > u32::MAX as i128 {
+            // Trigger a compile-time error in a const context.
+            build_error!("C enum value is out of bounds for the target type `u32`.");
+        }
+
+        // CAST: This cast is valid because the check above guarantees that `wide_val`
+        // is within the representable range of `u32`.
+        wide_val as u32
+    }
+}
+
+impl From<DataDirection> for bindings::dma_data_direction {
+    /// Returns the raw representation of [`enum dma_data_direction`].
+    fn from(direction: DataDirection) -> Self {
+        // CAST: `direction as u32` gets the underlying representation of our `#[repr(u32)]` enum.
+        // The subsequent cast to `Self` (the bindgen type) assumes the C enum is compatible
+        // with the enum variants of `DataDirection`, which is a valid assumption given our
+        // compile-time checks.
+        direction as u32 as Self
+    }
+}
+
+/// An abstraction of the `dma_alloc_coherent` API.
+///
+/// This is an abstraction around the `dma_alloc_coherent` API which is used to allocate and map
+/// large coherent DMA regions.
+///
+/// A [`Coherent`] instance contains a pointer to the allocated region (in the
+/// processor's virtual address space) and the device address which can be given to the device
+/// as the DMA address base of the region. The region is released once [`Coherent`]
+/// is dropped.
+///
+/// # Invariants
+///
+/// - For the lifetime of an instance of [`Coherent`], the `cpu_addr` is a valid pointer
+///   to an allocated region of coherent memory and `dma_handle` is the DMA address base of the
+///   region.
+/// - The size in bytes of the allocation is equal to size information via pointer.
+// TODO
+//
+// DMA allocations potentially carry device resources (e.g.IOMMU mappings), hence for soundness
+// reasons DMA allocation would need to be embedded in a `Devres` container, in order to ensure
+// that device resources can never survive device unbind.
+//
+// However, it is neither desirable nor necessary to protect the allocated memory of the DMA
+// allocation from surviving device unbind; it would require RCU read side critical sections to
+// access the memory, which may require subsequent unnecessary copies.
+//
+// Hence, find a way to revoke the device resources of a `Coherent`, but not the
+// entire `Coherent` including the allocated memory itself.
+pub struct Coherent<T: AsBytes + FromBytes + KnownSize + ?Sized> {
+    dev: ARef<device::Device>,
+    dma_handle: DmaAddress,
+    cpu_addr: NonNull<T>,
+    dma_attrs: Attrs,
+}
+
+impl<T: AsBytes + FromBytes + KnownSize + ?Sized> Coherent<T> {
+    /// Returns the size in bytes of this allocation.
+    #[inline]
+    pub fn size(&self) -> usize {
+        T::size(self.cpu_addr.as_ptr())
+    }
+
+    /// Returns the raw pointer to the allocated region in the CPU's virtual address space.
+    #[inline]
+    pub fn as_ptr(&self) -> *const T {
+        self.cpu_addr.as_ptr()
+    }
+
+    /// Returns the raw pointer to the allocated region in the CPU's virtual address space as
+    /// a mutable pointer.
+    #[inline]
+    pub fn as_mut_ptr(&self) -> *mut T {
+        self.cpu_addr.as_ptr()
+    }
+
+    /// Returns a DMA handle which may be given to the device as the DMA address base of
+    /// the region.
+    #[inline]
+    pub fn dma_handle(&self) -> DmaAddress {
+        self.dma_handle
+    }
+
+    /// Returns a reference to the data in the region.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that the device does not read/write to/from memory while the returned
+    ///   slice is live.
+    /// * Callers must ensure that this call does not race with a write to the same region while
+    ///   the returned slice is live.
+    #[inline]
+    pub unsafe fn as_ref(&self) -> &T {
+        // SAFETY: per safety requirement.
+        unsafe { &*self.as_ptr() }
+    }
+
+    /// Returns a mutable reference to the data in the region.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that the device does not read/write to/from memory while the returned
+    ///   slice is live.
+    /// * Callers must ensure that this call does not race with a read or write to the same region
+    ///   while the returned slice is live.
+    #[expect(clippy::mut_from_ref, reason = "unsafe to use API")]
+    #[inline]
+    pub unsafe fn as_mut(&self) -> &mut T {
+        // SAFETY: per safety requirement.
+        unsafe { &mut *self.as_mut_ptr() }
+    }
+}
+
+impl<T: AsBytes + FromBytes> Coherent<T> {
+    /// Allocates a region of `T` of coherent memory.
+    fn alloc_with_attrs(
+        dev: &device::Device<Bound>,
+        gfp_flags: kernel::alloc::Flags,
+        dma_attrs: Attrs,
+    ) -> Result<Self> {
+        const {
+            assert!(
+                core::mem::size_of::<T>() > 0,
+                "It doesn't make sense for the allocated type to be a ZST"
+            );
+        }
+
+        let mut dma_handle = 0;
+        // SAFETY: Device pointer is guaranteed as valid by the type invariant on `Device`.
+        let addr = unsafe {
+            bindings::dma_alloc_attrs(
+                dev.as_raw(),
+                core::mem::size_of::<T>(),
+                &mut dma_handle,
+                gfp_flags.as_raw(),
+                dma_attrs.as_raw(),
+            )
+        };
+        let cpu_addr = NonNull::new(addr.cast()).ok_or(ENOMEM)?;
+        // INVARIANT:
+        // - We just successfully allocated a coherent region which is adaquately sized for `T`,
+        //   hence the cpu address is valid.
+        // - We also hold a refcounted reference to the device.
+        Ok(Self {
+            dev: dev.into(),
+            dma_handle,
+            cpu_addr,
+            dma_attrs,
+        })
+    }
+
+    /// Allocates a region of type `T` of coherent memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use kernel::device::{Bound, Device};
+    /// use kernel::dma::{attrs::*, Coherent};
+    ///
+    /// # fn test(dev: &Device<Bound>) -> Result {
+    /// let c: Coherent<[u64; 4]> =
+    ///     Coherent::zeroed_with_attrs(dev, GFP_KERNEL, DMA_ATTR_NO_WARN)?;
+    /// # Ok::<(), Error>(()) }
+    /// ```
+    pub fn zeroed_with_attrs(
+        dev: &device::Device<Bound>,
+        gfp_flags: kernel::alloc::Flags,
+        dma_attrs: Attrs,
+    ) -> Result<Self> {
+        Self::alloc_with_attrs(dev, gfp_flags | __GFP_ZERO, dma_attrs)
+    }
+
+    /// Performs the same functionality as [`Coherent::zeroed_with_attrs`], except the
+    /// `dma_attrs` is 0 by default.
+    pub fn zeroed(dev: &device::Device<Bound>, gfp_flags: kernel::alloc::Flags) -> Result<Self> {
+        Self::zeroed_with_attrs(dev, gfp_flags, Attrs(0))
+    }
+
+    /// Allocates a region of `[T; len]` of coherent memory.
+    fn alloc_slice_with_attrs(
+        dev: &device::Device<Bound>,
+        len: usize,
+        gfp_flags: kernel::alloc::Flags,
+        dma_attrs: Attrs,
+    ) -> Result<Coherent<[T]>> {
+        const {
+            assert!(
+                core::mem::size_of::<T>() > 0,
+                "It doesn't make sense for the allocated type to be a ZST"
+            );
+        }
+
+        // `dma_alloc_attrs` cannot handle zero-length allocation, bail early.
+        if len == 0 {
+            Err(EINVAL)?;
+        }
+
+        let size = core::mem::size_of::<T>().checked_mul(len).ok_or(ENOMEM)?;
+        let mut dma_handle = 0;
+        // SAFETY: Device pointer is guaranteed as valid by the type invariant on `Device`.
+        let addr = unsafe {
+            bindings::dma_alloc_attrs(
+                dev.as_raw(),
+                size,
+                &mut dma_handle,
+                gfp_flags.as_raw(),
+                dma_attrs.as_raw(),
+            )
+        };
+        let cpu_addr = NonNull::slice_from_raw_parts(NonNull::new(addr.cast()).ok_or(ENOMEM)?, len);
+        // INVARIANT:
+        // - We just successfully allocated a coherent region which is adaquately sized for `[T; len]`,
+        //   hence the cpu address is valid.
+        // - We also hold a refcounted reference to the device.
+        Ok(Coherent {
+            dev: dev.into(),
+            dma_handle,
+            cpu_addr,
+            dma_attrs,
+        })
+    }
+
+    /// Allocates a zeroed region of type `T` of coherent memory.
+    ///
+    /// Unlike `Coherent::<[T; N]>::zeroed_with_attrs`, `Coherent::<T>::zeored_slices` support
+    /// a runtime length.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use kernel::device::{Bound, Device};
+    /// use kernel::dma::{attrs::*, Coherent};
+    ///
+    /// # fn test(dev: &Device<Bound>) -> Result {
+    /// let c: Coherent<[u64]> =
+    ///     Coherent::zeroed_slice_with_attrs(dev, 4, GFP_KERNEL, DMA_ATTR_NO_WARN)?;
+    /// # Ok::<(), Error>(()) }
+    /// ```
+    pub fn zeroed_slice_with_attrs(
+        dev: &device::Device<Bound>,
+        len: usize,
+        gfp_flags: kernel::alloc::Flags,
+        dma_attrs: Attrs,
+    ) -> Result<Coherent<[T]>> {
+        Coherent::alloc_slice_with_attrs(dev, len, gfp_flags | __GFP_ZERO, dma_attrs)
+    }
+
+    /// Performs the same functionality as [`Coherent::zeroed_slice_with_attrs`], except the
+    /// `dma_attrs` is 0 by default.
+    pub fn zeroed_slice(
+        dev: &device::Device<Bound>,
+        len: usize,
+        gfp_flags: kernel::alloc::Flags,
+    ) -> Result<Coherent<[T]>> {
+        Self::zeroed_slice_with_attrs(dev, len, gfp_flags, Attrs(0))
+    }
+}
+
+impl<T: AsBytes + FromBytes> Coherent<[T]> {
+    /// Returns the number of elements `T` in this allocation.
+    ///
+    /// Note that this is not the size of the allocation in bytes, which is provided by
+    /// [`Self::size`].
+    #[inline]
+    #[expect(clippy::len_without_is_empty, reason = "Coherent slice is never empty")]
+    pub fn len(&self) -> usize {
+        self.cpu_addr.len()
+    }
+}
+
+/// Note that the device configured to do DMA must be halted before this object is dropped.
+impl<T: AsBytes + FromBytes + KnownSize + ?Sized> Drop for Coherent<T> {
+    fn drop(&mut self) {
+        let size = T::size(self.cpu_addr.as_ptr());
+        // SAFETY: Device pointer is guaranteed as valid by the type invariant on `Device`.
+        // The cpu address, and the dma handle are valid due to the type invariants on
+        // `Coherent`.
+        unsafe {
+            bindings::dma_free_attrs(
+                self.dev.as_raw(),
+                size,
+                self.cpu_addr.as_ptr().cast(),
+                self.dma_handle,
+                self.dma_attrs.as_raw(),
+            )
+        }
+    }
+}
+
+// SAFETY: It is safe to send a `Coherent` to another thread if `T`
+// can be sent to another thread.
+unsafe impl<T: AsBytes + FromBytes + KnownSize + Send + ?Sized> Send for Coherent<T> {}
+
+impl<T: ?Sized + AsBytes + FromBytes + KnownSize> Io for Coherent<T> {
+    type Type = T;
+
+    #[inline]
+    fn as_ptr(&self) -> *mut Self::Type {
+        self.as_mut_ptr()
+    }
+}
+
+impl<B: ?Sized + AsBytes + FromBytes + KnownSize, T: AsBytes + FromBytes> IoCapable<T>
+    for Coherent<B>
+{
+    #[inline]
+    unsafe fn io_read(&self, address: *mut T) -> T {
+        // SAFETY:
+        // - By the safety precondition, the address is within bounds of the allocation and
+        //   aligned.
+        // - Using read_volatile() here so that race with hardware is well-defined.
+        // - Using read_volatile() here is not sound if it races with other CPU per Rust rules,
+        //   but this is allowed per LKMM.
+        unsafe { address.read_volatile() }
+    }
+
+    #[inline]
+    unsafe fn io_write(&self, value: T, address: *mut T) {
+        // SAFETY:
+        // // - By the safety precondition, the address is within bounds of the allocation and
+        //   aligned.
+        // - Using write_volatile() here so that race with hardware is well-defined.
+        // - Using write_volatile() here is not sound if it race with other CPU per Rust rules,
+        //   but this is allowed per LKMM.
+        unsafe { address.write_volatile(value) }
+    }
+}
+
+impl<'a, B: ?Sized + AsBytes + FromBytes + KnownSize, T> crate::io::View<'a, Coherent<B>, T> {
+    /// Returns a reference to the data in the region.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that the device does not read/write to/from memory while the returned
+    ///   slice is live.
+    /// * Callers must ensure that this call does not race with a write to the same region while
+    ///   the returned slice is live.
+    #[inline]
+    pub unsafe fn as_ref(self) -> &'a T {
+        let ptr = self.as_ptr();
+        // SAFETY: pointer is aligned and valid per type invariant of `View`. Aliasing rule is
+        // satisfied per safety requirement.
+        unsafe { &*ptr }
+    }
+
+    /// Returns a mutable reference to the data in the region.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that the device does not read/write to/from memory while the returned
+    ///   slice is live.
+    /// * Callers must ensure that this call does not race with a read or write to the same region
+    ///   while the returned slice is live.
+    #[inline]
+    pub unsafe fn as_mut(self) -> &'a mut T {
+        let ptr = self.as_ptr();
+        // SAFETY: pointer is aligned and valid per type invariant of `View`. Aliasing rule is
+        // satisfied per safety requirement.
+        unsafe { &mut *ptr }
+    }
+}

@@ -39,6 +39,7 @@
 *.o
 *.o.*
 *.patch
+*.rlib
 *.rmeta
 *.rpm
 *.rsi
