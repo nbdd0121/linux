@@ -87,5 +87,6 @@ if FB_CORE || SGI_NEWPORT_CONSOLE
 endif
 
 source "drivers/gpu/trace/Kconfig"
+source "drivers/gpu/nova-core/Kconfig"
 
 endmenu

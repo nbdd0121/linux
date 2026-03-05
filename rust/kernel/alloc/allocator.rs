@@ -82,7 +82,7 @@ impl ReallocFunc {
         layout: Layout,
         old_layout: Layout,
         flags: Flags,
-        nid: NumaNode,
+        _nid: NumaNode,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let size = layout.size();
         let ptr = match ptr {
