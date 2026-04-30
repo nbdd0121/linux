@@ -102,7 +102,7 @@ quote-flags := \
     --extern proc_macro2 \
     $(call cfgs-to-flags,$(quote-cfgs))
 
-# `extra-traits`, `fold` and `visit` may be enabled if needed.
+# `extra-traits` and `fold` may be enabled if needed.
 syn-cfgs := \
     feature="clone-impls" \
     feature="derive" \
@@ -110,6 +110,7 @@ syn-cfgs := \
     feature="parsing" \
     feature="printing" \
     feature="proc-macro" \
+    feature="visit" \
     feature="visit-mut"
 
 syn-flags := \
