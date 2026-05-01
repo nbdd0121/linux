@@ -870,7 +870,9 @@ macro_rules! assert_pinned {
         // SAFETY: This code is unreachable.
         let _ = move |ptr: *mut $ty| unsafe {
             let data = <$ty as $crate::__internal::HasPinData>::__pin_data();
-            data.$field(ptr)
+            _ = data
+                .__with_lt()
+                .$field(ptr)
                 .init($crate::__internal::AlwaysFail::<$field_ty>::new());
         };
     };
