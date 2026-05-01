@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, ToTokens};
 use syn::{
-    visit::Visit, Attribute, BoundLifetimes, GenericParam, Generics, Index, Lifetime, Member, Token,
+    visit::Visit, Attribute, BoundLifetimes, GenericParam, Generics, Index, Lifetime, Member,
+    Token, TypePath,
 };
 
 use crate::DiagCtxt;
@@ -325,5 +326,31 @@ impl<'a, F: FnMut(&'a Lifetime)> Visit<'a> for LifetimeVisitor<'a, F> {
             }
             this.visit_return_type(&bare_fn.output);
         });
+    }
+}
+
+pub(crate) trait GenericParamExt {
+    fn maybe_type_params_visitor<'a>(f: impl FnMut(&'a Ident)) -> impl Visit<'a>;
+}
+
+impl GenericParamExt for GenericParam {
+    fn maybe_type_params_visitor<'a>(f: impl FnMut(&'a Ident)) -> impl Visit<'a> {
+        struct TypeParamVisitor<F>(F);
+
+        impl<'a, F> Visit<'a> for TypeParamVisitor<F>
+        where
+            F: FnMut(&'a Ident),
+        {
+            fn visit_type_path(&mut self, ty: &'a TypePath) {
+                if ty.qself.is_none() {
+                    if let Some(ident) = ty.path.get_ident() {
+                        (self.0)(ident);
+                    }
+                }
+                syn::visit::visit_type_path(self, ty);
+            }
+        }
+
+        TypeParamVisitor(f)
     }
 }
