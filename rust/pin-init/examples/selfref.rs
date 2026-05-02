@@ -13,6 +13,12 @@ fn use_self_ref() {
         str: "hello world".to_owned(),
         part: &str[..5],
     }));
+
+    // Access via projection.
+    println!("{}", foo.as_mut().project().part);
+
+    // Access via accessor.
+    println!("{}", foo.part());
 }
 
 fn main() {
