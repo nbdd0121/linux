@@ -41,27 +41,33 @@ use core::{
 };
 
 /// An adapter for the registration of platform drivers.
-pub struct Adapter<T: Driver>(T);
-
-// SAFETY:
-// - `bindings::platform_driver` is a C type declared as `repr(C)`.
-// - `T` is the type of the driver's device private data.
-// - `struct platform_driver` embeds a `struct device_driver`.
-// - `DEVICE_DRIVER_OFFSET` is the correct byte offset to the embedded `struct device_driver`.
-unsafe impl<T: Driver + 'static> driver::DriverLayout for Adapter<T> {
-    type DriverType = bindings::platform_driver;
-    type DriverData = T;
-    const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+pub struct Adapter<T: Driver> {
+    pdrv: Opaque<bindings::platform_driver>,
+    phantom: PhantomData<T>,
 }
 
-// SAFETY: A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
-// a preceding call to `register` has been successful.
+// SAFETY:
+// - `as_device_driver` returns a valid pointer.
+// - `T` is the type of the driver's device private data.
+// - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
+//   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    unsafe fn register(
-        pdrv: &Opaque<Self::DriverType>,
-        name: &'static CStr,
-        module: &'static ThisModule,
-    ) -> Result {
+    type DriverData = T;
+
+    unsafe fn init() -> impl PinInit<Self> {
+        init!(Self {
+            pdrv: Opaque::zeroed(),
+            phantom: PhantomData,
+        })
+    }
+
+    #[inline]
+    fn as_device_driver(&self) -> *mut bindings::device_driver {
+        // SAFETY: `self.pdrv.get()` is valid.
+        unsafe { &raw mut (*self.pdrv.get()).driver }
+    }
+
+    unsafe fn register(&self, name: &'static CStr, module: &'static ThisModule) -> Result {
         let of_table = match T::OF_ID_TABLE {
             Some(table) => table.as_ptr(),
             None => core::ptr::null(),
@@ -72,22 +78,24 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
             None => core::ptr::null(),
         };
 
+        let pdrv = self.pdrv.get();
+
         // SAFETY: It's safe to set the fields of `struct platform_driver` on initialization.
         unsafe {
-            (*pdrv.get()).driver.name = name.as_char_ptr();
-            (*pdrv.get()).probe = Some(Self::probe_callback);
-            (*pdrv.get()).remove = Some(Self::remove_callback);
-            (*pdrv.get()).driver.of_match_table = of_table;
-            (*pdrv.get()).driver.acpi_match_table = acpi_table;
+            (*pdrv).driver.name = name.as_char_ptr();
+            (*pdrv).probe = Some(Self::probe_callback);
+            (*pdrv).remove = Some(Self::remove_callback);
+            (*pdrv).driver.of_match_table = of_table;
+            (*pdrv).driver.acpi_match_table = acpi_table;
         }
 
-        // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
-        to_result(unsafe { bindings::__platform_driver_register(pdrv.get(), module.0) })
+        // SAFETY: `pdrv` is valid.
+        to_result(unsafe { bindings::__platform_driver_register(pdrv, module.0) })
     }
 
-    unsafe fn unregister(pdrv: &Opaque<Self::DriverType>) {
-        // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
-        unsafe { bindings::platform_driver_unregister(pdrv.get()) };
+    unsafe fn unregister(&self) {
+        // SAFETY: `pdrv` is valid.
+        unsafe { bindings::platform_driver_unregister(self.pdrv.get()) };
     }
 }
 

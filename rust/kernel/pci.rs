@@ -55,44 +55,50 @@ pub use self::irq::{
 };
 
 /// An adapter for the registration of PCI drivers.
-pub struct Adapter<T: Driver>(T);
-
-// SAFETY:
-// - `bindings::pci_driver` is a C type declared as `repr(C)`.
-// - `T` is the type of the driver's device private data.
-// - `struct pci_driver` embeds a `struct device_driver`.
-// - `DEVICE_DRIVER_OFFSET` is the correct byte offset to the embedded `struct device_driver`.
-unsafe impl<T: Driver + 'static> driver::DriverLayout for Adapter<T> {
-    type DriverType = bindings::pci_driver;
-    type DriverData = T;
-    const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+pub struct Adapter<T: Driver> {
+    pdrv: Opaque<bindings::pci_driver>,
+    phantom: PhantomData<T>,
 }
 
-// SAFETY: A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
-// a preceding call to `register` has been successful.
+// SAFETY:
+// - `as_device_driver` returns a valid pointer.
+// - `T` is the type of the driver's device private data.
+// - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
+//   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    unsafe fn register(
-        pdrv: &Opaque<Self::DriverType>,
-        name: &'static CStr,
-        module: &'static ThisModule,
-    ) -> Result {
-        // SAFETY: It's safe to set the fields of `struct pci_driver` on initialization.
-        unsafe {
-            (*pdrv.get()).name = name.as_char_ptr();
-            (*pdrv.get()).probe = Some(Self::probe_callback);
-            (*pdrv.get()).remove = Some(Self::remove_callback);
-            (*pdrv.get()).id_table = T::ID_TABLE.as_ptr();
-        }
+    type DriverData = T;
 
-        // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
-        to_result(unsafe {
-            bindings::__pci_register_driver(pdrv.get(), module.0, name.as_char_ptr())
+    unsafe fn init() -> impl PinInit<Self> {
+        init!(Self {
+            pdrv: Opaque::zeroed(),
+            phantom: PhantomData,
         })
     }
 
-    unsafe fn unregister(pdrv: &Opaque<Self::DriverType>) {
-        // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
-        unsafe { bindings::pci_unregister_driver(pdrv.get()) }
+    #[inline]
+    fn as_device_driver(&self) -> *mut bindings::device_driver {
+        // SAFETY: `self.pdrv.get()` is valid.
+        unsafe { &raw mut (*self.pdrv.get()).driver }
+    }
+
+    unsafe fn register(&self, name: &'static CStr, module: &'static ThisModule) -> Result {
+        let pdrv = self.pdrv.get();
+
+        // SAFETY: It's safe to set the fields of `struct pci_driver` on initialization.
+        unsafe {
+            (*pdrv).name = name.as_char_ptr();
+            (*pdrv).probe = Some(Self::probe_callback);
+            (*pdrv).remove = Some(Self::remove_callback);
+            (*pdrv).id_table = T::ID_TABLE.as_ptr();
+        }
+
+        // SAFETY: `pdrv` is valid.
+        to_result(unsafe { bindings::__pci_register_driver(pdrv, module.0, name.as_char_ptr()) })
+    }
+
+    unsafe fn unregister(&self) {
+        // SAFETY: `pdrv` is valid.
+        unsafe { bindings::pci_unregister_driver(self.pdrv.get()) }
     }
 }
 

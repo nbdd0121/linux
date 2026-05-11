@@ -89,27 +89,33 @@ macro_rules! i2c_device_table {
 }
 
 /// An adapter for the registration of I2C drivers.
-pub struct Adapter<T: Driver>(T);
-
-// SAFETY:
-// - `bindings::i2c_driver` is a C type declared as `repr(C)`.
-// - `T` is the type of the driver's device private data.
-// - `struct i2c_driver` embeds a `struct device_driver`.
-// - `DEVICE_DRIVER_OFFSET` is the correct byte offset to the embedded `struct device_driver`.
-unsafe impl<T: Driver + 'static> driver::DriverLayout for Adapter<T> {
-    type DriverType = bindings::i2c_driver;
-    type DriverData = T;
-    const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+pub struct Adapter<T: Driver> {
+    idrv: Opaque<bindings::i2c_driver>,
+    phantom: PhantomData<T>,
 }
 
-// SAFETY: A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
-// a preceding call to `register` has been successful.
+// SAFETY:
+// - `as_device_driver` returns a valid pointer.
+// - `T` is the type of the driver's device private data.
+// - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
+//   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    unsafe fn register(
-        idrv: &Opaque<Self::DriverType>,
-        name: &'static CStr,
-        module: &'static ThisModule,
-    ) -> Result {
+    type DriverData = T;
+
+    unsafe fn init() -> impl PinInit<Self> {
+        init!(Self {
+            idrv: Opaque::zeroed(),
+            phantom: PhantomData,
+        })
+    }
+
+    #[inline]
+    fn as_device_driver(&self) -> *mut bindings::device_driver {
+        // SAFETY: `self.idrv.get()` is valid.
+        unsafe { &raw mut (*self.idrv.get()).driver }
+    }
+
+    unsafe fn register(&self, name: &'static CStr, module: &'static ThisModule) -> Result {
         build_assert!(
             T::ACPI_ID_TABLE.is_some() || T::OF_ID_TABLE.is_some() || T::I2C_ID_TABLE.is_some(),
             "At least one of ACPI/OF/Legacy tables must be present when registering an i2c driver"
@@ -130,24 +136,26 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
             None => core::ptr::null(),
         };
 
+        let idrv = self.idrv.get();
+
         // SAFETY: It's safe to set the fields of `struct i2c_client` on initialization.
         unsafe {
-            (*idrv.get()).driver.name = name.as_char_ptr();
-            (*idrv.get()).probe = Some(Self::probe_callback);
-            (*idrv.get()).remove = Some(Self::remove_callback);
-            (*idrv.get()).shutdown = Some(Self::shutdown_callback);
-            (*idrv.get()).id_table = i2c_table;
-            (*idrv.get()).driver.of_match_table = of_table;
-            (*idrv.get()).driver.acpi_match_table = acpi_table;
+            (*idrv).driver.name = name.as_char_ptr();
+            (*idrv).probe = Some(Self::probe_callback);
+            (*idrv).remove = Some(Self::remove_callback);
+            (*idrv).shutdown = Some(Self::shutdown_callback);
+            (*idrv).id_table = i2c_table;
+            (*idrv).driver.of_match_table = of_table;
+            (*idrv).driver.acpi_match_table = acpi_table;
         }
 
-        // SAFETY: `idrv` is guaranteed to be a valid `DriverType`.
-        to_result(unsafe { bindings::i2c_register_driver(module.0, idrv.get()) })
+        // SAFETY: `idrv` is valid.
+        to_result(unsafe { bindings::i2c_register_driver(module.0, idrv) })
     }
 
-    unsafe fn unregister(idrv: &Opaque<Self::DriverType>) {
-        // SAFETY: `idrv` is guaranteed to be a valid `DriverType`.
-        unsafe { bindings::i2c_del_driver(idrv.get()) }
+    unsafe fn unregister(&self) {
+        // SAFETY: `idrv` is valid.
+        unsafe { bindings::i2c_del_driver(self.idrv.get()) }
     }
 }
 

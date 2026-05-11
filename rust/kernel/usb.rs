@@ -32,44 +32,50 @@ use core::{
 };
 
 /// An adapter for the registration of USB drivers.
-pub struct Adapter<T: Driver>(T);
-
-// SAFETY:
-// - `bindings::usb_driver` is a C type declared as `repr(C)`.
-// - `T` is the type of the driver's device private data.
-// - `struct usb_driver` embeds a `struct device_driver`.
-// - `DEVICE_DRIVER_OFFSET` is the correct byte offset to the embedded `struct device_driver`.
-unsafe impl<T: Driver + 'static> driver::DriverLayout for Adapter<T> {
-    type DriverType = bindings::usb_driver;
-    type DriverData = T;
-    const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+pub struct Adapter<T: Driver> {
+    udrv: Opaque<bindings::usb_driver>,
+    phantom: PhantomData<T>,
 }
 
-// SAFETY: A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
-// a preceding call to `register` has been successful.
+// SAFETY:
+// - `as_device_driver` returns a valid pointer.
+// - `T` is the type of the driver's device private data.
+// - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
+//   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    unsafe fn register(
-        udrv: &Opaque<Self::DriverType>,
-        name: &'static CStr,
-        module: &'static ThisModule,
-    ) -> Result {
-        // SAFETY: It's safe to set the fields of `struct usb_driver` on initialization.
-        unsafe {
-            (*udrv.get()).name = name.as_char_ptr();
-            (*udrv.get()).probe = Some(Self::probe_callback);
-            (*udrv.get()).disconnect = Some(Self::disconnect_callback);
-            (*udrv.get()).id_table = T::ID_TABLE.as_ptr();
-        }
+    type DriverData = T;
 
-        // SAFETY: `udrv` is guaranteed to be a valid `DriverType`.
-        to_result(unsafe {
-            bindings::usb_register_driver(udrv.get(), module.0, name.as_char_ptr())
+    unsafe fn init() -> impl PinInit<Self> {
+        init!(Self {
+            udrv: Opaque::zeroed(),
+            phantom: PhantomData,
         })
     }
 
-    unsafe fn unregister(udrv: &Opaque<Self::DriverType>) {
+    #[inline]
+    fn as_device_driver(&self) -> *mut bindings::device_driver {
+        // SAFETY: `self.udrv.get()` is valid.
+        unsafe { &raw mut (*self.udrv.get()).driver }
+    }
+
+    unsafe fn register(&self, name: &'static CStr, module: &'static ThisModule) -> Result {
+        let udrv = self.udrv.get();
+
+        // SAFETY: It's safe to set the fields of `struct usb_driver` on initialization.
+        unsafe {
+            (*udrv).name = name.as_char_ptr();
+            (*udrv).probe = Some(Self::probe_callback);
+            (*udrv).disconnect = Some(Self::disconnect_callback);
+            (*udrv).id_table = T::ID_TABLE.as_ptr();
+        }
+
         // SAFETY: `udrv` is guaranteed to be a valid `DriverType`.
-        unsafe { bindings::usb_deregister(udrv.get()) };
+        to_result(unsafe { bindings::usb_register_driver(udrv, module.0, name.as_char_ptr()) })
+    }
+
+    unsafe fn unregister(&self) {
+        // SAFETY: `udrv` is guaranteed to be a valid `DriverType`.
+        unsafe { bindings::usb_deregister(self.udrv.get()) };
     }
 }
 

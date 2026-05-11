@@ -37,44 +37,51 @@ use core::{
 };
 
 /// An adapter for the registration of auxiliary drivers.
-pub struct Adapter<T: Driver>(T);
-
-// SAFETY:
-// - `bindings::auxiliary_driver` is a C type declared as `repr(C)`.
-// - `T` is the type of the driver's device private data.
-// - `struct auxiliary_driver` embeds a `struct device_driver`.
-// - `DEVICE_DRIVER_OFFSET` is the correct byte offset to the embedded `struct device_driver`.
-unsafe impl<T: Driver + 'static> driver::DriverLayout for Adapter<T> {
-    type DriverType = bindings::auxiliary_driver;
-    type DriverData = T;
-    const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+pub struct Adapter<T: Driver> {
+    adrv: Opaque<bindings::auxiliary_driver>,
+    phantom: PhantomData<T>,
 }
 
-// SAFETY: A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
-// a preceding call to `register` has been successful.
+// SAFETY:
+// - `as_device_driver` returns a valid pointer.
+// - `T` is the type of the driver's device private data.
+// - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
+//   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    unsafe fn register(
-        adrv: &Opaque<Self::DriverType>,
-        name: &'static CStr,
-        module: &'static ThisModule,
-    ) -> Result {
-        // SAFETY: It's safe to set the fields of `struct auxiliary_driver` on initialization.
-        unsafe {
-            (*adrv.get()).name = name.as_char_ptr();
-            (*adrv.get()).probe = Some(Self::probe_callback);
-            (*adrv.get()).remove = Some(Self::remove_callback);
-            (*adrv.get()).id_table = T::ID_TABLE.as_ptr();
-        }
+    type DriverData = T;
 
-        // SAFETY: `adrv` is guaranteed to be a valid `DriverType`.
-        to_result(unsafe {
-            bindings::__auxiliary_driver_register(adrv.get(), module.0, name.as_char_ptr())
+    unsafe fn init() -> impl PinInit<Self> {
+        init!(Self {
+            adrv: Opaque::zeroed(),
+            phantom: PhantomData,
         })
     }
 
-    unsafe fn unregister(adrv: &Opaque<Self::DriverType>) {
-        // SAFETY: `adrv` is guaranteed to be a valid `DriverType`.
-        unsafe { bindings::auxiliary_driver_unregister(adrv.get()) }
+    fn as_device_driver(&self) -> *mut bindings::device_driver {
+        // SAFETY: `self.adrv.get()` is valid.
+        unsafe { &raw mut (*self.adrv.get()).driver }
+    }
+
+    unsafe fn register(&self, name: &'static CStr, module: &'static ThisModule) -> Result {
+        let adrv = self.adrv.get();
+
+        // SAFETY: It's safe to set the fields of `struct auxiliary_driver` on initialization.
+        unsafe {
+            (*adrv).name = name.as_char_ptr();
+            (*adrv).probe = Some(Self::probe_callback);
+            (*adrv).remove = Some(Self::remove_callback);
+            (*adrv).id_table = T::ID_TABLE.as_ptr();
+        }
+
+        // SAFETY: `adrv` is valid.
+        to_result(unsafe {
+            bindings::__auxiliary_driver_register(adrv, module.0, name.as_char_ptr())
+        })
+    }
+
+    unsafe fn unregister(&self) {
+        // SAFETY: `adrv` is valid.
+        unsafe { bindings::auxiliary_driver_unregister(self.adrv.get()) }
     }
 }
 
