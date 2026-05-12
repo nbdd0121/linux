@@ -129,7 +129,10 @@ pub(crate) struct Gsp {
 
 impl Gsp {
     // Creates an in-place initializer for a `Gsp` manager for `pdev`.
-    pub(crate) fn new(pdev: &pci::Device<device::Bound>) -> impl PinInit<Self, Error> + '_ {
+    pub(crate) fn new<'a>(
+        driver: &'a super::driver::NovaCoreDriver,
+        pdev: &'a pci::Device<device::Bound>,
+    ) -> impl PinInit<Self, Error> + 'a {
         pin_init::pin_init_scope(move || {
             let dev = pdev.as_ref();
 
@@ -164,17 +167,7 @@ impl Gsp {
                         logrm,
                     };
 
-                    #[allow(static_mut_refs)]
-                    // SAFETY: `DEBUGFS_ROOT` is created before driver registration and cleared
-                    // after driver unregistration, so no probe() can race with its modification.
-                    //
-                    // PANIC: `DEBUGFS_ROOT` cannot be `None` here.  It is set before driver
-                    // registration and cleared after driver unregistration, so it is always
-                    // `Some` for the entire lifetime that probe() can be called.
-                    let log_parent: &debugfs::Dir = unsafe { crate::DEBUGFS_ROOT.as_ref() }
-                        .expect("DEBUGFS_ROOT not initialized");
-
-                    log_parent.scope(log_buffers, dev.name(), |logs, dir| {
+                    driver.debugfs.scope(log_buffers, dev.name(), |logs, dir| {
                         dir.read_binary_file(c"loginit", &logs.loginit.0);
                         dir.read_binary_file(c"logintr", &logs.logintr.0);
                         dir.read_binary_file(c"logrm", &logs.logrm.0);

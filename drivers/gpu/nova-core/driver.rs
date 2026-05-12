@@ -2,12 +2,15 @@
 
 use kernel::{
     auxiliary,
+    debugfs,
     device::Core,
     devres::Devres,
-    dma::Device,
-    dma::DmaMask,
-    pci,
+    dma::{
+        Device,
+        DmaMask, //
+    },
     pci::{
+        self,
         Class,
         ClassMask,
         Vendor, //
@@ -20,7 +23,7 @@ use kernel::{
             Relaxed, //
         },
         Arc,
-    },
+    }, //
 };
 
 use crate::gpu::Gpu;
@@ -33,6 +36,10 @@ pub(crate) struct NovaCore {
     #[pin]
     pub(crate) gpu: Gpu,
     _reg: Devres<auxiliary::Registration<()>>,
+}
+
+pub(crate) struct NovaCoreDriver {
+    pub(crate) debugfs: debugfs::Dir,
 }
 
 const BAR0_SIZE: usize = SZ_16M;
@@ -50,7 +57,7 @@ pub(crate) type Bar0 = pci::Bar<BAR0_SIZE>;
 kernel::pci_device_table!(
     PCI_TABLE,
     MODULE_PCI_TABLE,
-    <NovaCore as pci::Driver>::IdInfo,
+    <NovaCoreDriver as pci::DriverNew>::IdInfo,
     [
         // Modern NVIDIA GPUs will show up as either VGA or 3D controllers.
         (
@@ -72,11 +79,16 @@ kernel::pci_device_table!(
     ]
 );
 
-impl pci::Driver for NovaCore {
+impl pci::DriverNew for NovaCoreDriver {
+    type Data = NovaCore;
     type IdInfo = ();
     const ID_TABLE: pci::IdTable<Self::IdInfo> = &PCI_TABLE;
 
-    fn probe(pdev: &pci::Device<Core>, _info: &Self::IdInfo) -> impl PinInit<Self, Error> {
+    fn probe(
+        &self,
+        pdev: &pci::Device<Core>,
+        _info: &Self::IdInfo,
+    ) -> impl PinInit<NovaCore, Error> {
         pin_init::pin_init_scope(move || {
             dev_dbg!(pdev, "Probe Nova Core GPU driver.\n");
 
@@ -93,8 +105,8 @@ impl pci::Driver for NovaCore {
                 GFP_KERNEL,
             )?;
 
-            Ok(try_pin_init!(Self {
-                gpu <- Gpu::new(pdev, bar.clone(), bar.access(pdev.as_ref())?),
+            Ok(try_pin_init!(NovaCore {
+                gpu <- Gpu::new(self, pdev, bar.clone(), bar.access(pdev.as_ref())?),
                 _reg: auxiliary::Registration::new(
                     pdev.as_ref(),
                     c"nova-drm",
@@ -108,7 +120,7 @@ impl pci::Driver for NovaCore {
         })
     }
 
-    fn unbind(pdev: &pci::Device<Core>, this: Pin<&Self>) {
+    fn unbind(&self, pdev: &pci::Device<Core>, this: Pin<&NovaCore>) {
         this.gpu.unbind(pdev.as_ref());
     }
 }
