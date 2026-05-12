@@ -55,9 +55,9 @@ pub use self::irq::{
 };
 
 /// An adapter for the registration of PCI drivers.
-pub struct Adapter<T: Driver> {
+pub struct AdapterNew<T: DriverNew> {
     pdrv: Opaque<bindings::pci_driver>,
-    phantom: PhantomData<T>,
+    data: T,
 }
 
 // SAFETY:
@@ -65,14 +65,14 @@ pub struct Adapter<T: Driver> {
 // - `T` is the type of the driver's device private data.
 // - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
 //   a preceding call to `register` has been successful.
-unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    type RegistrationData = ();
-    type DriverData = T;
+unsafe impl<T: DriverNew + 'static> driver::RegistrationOps for AdapterNew<T> {
+    type RegistrationData = T;
+    type DriverData = T::Data;
 
-    unsafe fn init((): ()) -> impl PinInit<Self> {
+    unsafe fn init(data: T) -> impl PinInit<Self> {
         init!(Self {
             pdrv: Opaque::zeroed(),
-            phantom: PhantomData,
+            data,
         })
     }
 
@@ -103,11 +103,14 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
     }
 }
 
-impl<T: Driver + 'static> Adapter<T> {
+impl<T: DriverNew + 'static> AdapterNew<T> {
     extern "C" fn probe_callback(
         pdev: *mut bindings::pci_dev,
         id: *const bindings::pci_device_id,
     ) -> c_int {
+        // SAFETY: `pdev->driver` is set to this driver before `probe` call.
+        let this = unsafe { &*container_of!((*pdev).driver.cast::<Opaque<_>>(), Self, pdrv) };
+
         // SAFETY: The PCI bus only ever calls the probe callback with a valid pointer to a
         // `struct pci_dev`.
         //
@@ -120,7 +123,7 @@ impl<T: Driver + 'static> Adapter<T> {
         let info = T::ID_TABLE.info(id.index());
 
         from_result(|| {
-            let data = T::probe(pdev, info);
+            let data = T::probe(&this.data, pdev, info);
 
             pdev.as_ref().set_drvdata(data)?;
             Ok(0)
@@ -128,6 +131,9 @@ impl<T: Driver + 'static> Adapter<T> {
     }
 
     extern "C" fn remove_callback(pdev: *mut bindings::pci_dev) {
+        // SAFETY: `pdev->driver` is set to this driver while device is bound.
+        let this = unsafe { &*container_of!((*pdev).driver.cast::<Opaque<_>>(), Self, pdrv) };
+
         // SAFETY: The PCI bus only ever calls the remove callback with a valid pointer to a
         // `struct pci_dev`.
         //
@@ -137,11 +143,44 @@ impl<T: Driver + 'static> Adapter<T> {
         // SAFETY: `remove_callback` is only ever called after a successful call to
         // `probe_callback`, hence it's guaranteed that `Device::set_drvdata()` has been called
         // and stored a `Pin<KBox<T>>`.
-        let data = unsafe { pdev.as_ref().drvdata_borrow::<T>() };
+        let data = unsafe { pdev.as_ref().drvdata_borrow::<T::Data>() };
 
-        T::unbind(pdev, data);
+        T::unbind(&this.data, pdev, data);
     }
 }
+
+/// Convert [`Driver`] implementation to [`DriverNew`].
+pub struct Compat<T>(PhantomData<T>);
+
+impl<T> Default for Compat<T> {
+    #[inline]
+    fn default() -> Self {
+        Compat(PhantomData)
+    }
+}
+
+impl<T: Driver> DriverNew for Compat<T> {
+    type Data = T;
+
+    type IdInfo = T::IdInfo;
+
+    const ID_TABLE: IdTable<Self::IdInfo> = T::ID_TABLE;
+
+    fn probe(
+        &self,
+        dev: &Device<device::Core>,
+        id_info: &Self::IdInfo,
+    ) -> impl PinInit<Self::Data, Error> {
+        T::probe(dev, id_info)
+    }
+
+    fn unbind(&self, dev: &Device<device::Core>, this: Pin<&Self::Data>) {
+        T::unbind(dev, this);
+    }
+}
+
+/// An adapter for the registration of PCI drivers.
+pub type Adapter<T> = AdapterNew<Compat<T>>;
 
 /// Declares a kernel module that exposes a single PCI driver.
 ///
@@ -261,6 +300,81 @@ macro_rules! pci_device_table {
 
         $crate::module_device_table!("pci", $module_table_name, $table_name);
     };
+}
+
+/// The PCI driver trait.
+///
+/// # Examples
+///
+///```
+/// # use kernel::{bindings, device::Core, pci};
+///
+/// struct MyDriver;
+///
+/// kernel::pci_device_table!(
+///     PCI_TABLE,
+///     MODULE_PCI_TABLE,
+///     <MyDriver as pci::Driver>::IdInfo,
+///     [
+///         (
+///             pci::DeviceId::from_id(pci::Vendor::REDHAT, bindings::PCI_ANY_ID as u32),
+///             (),
+///         )
+///     ]
+/// );
+///
+/// impl pci::Driver for MyDriver {
+///     type IdInfo = ();
+///     const ID_TABLE: pci::IdTable<Self::IdInfo> = &PCI_TABLE;
+///
+///     fn probe(
+///         _pdev: &pci::Device<Core>,
+///         _id_info: &Self::IdInfo,
+///     ) -> impl PinInit<Self, Error> {
+///         Err(ENODEV)
+///     }
+/// }
+///```
+/// Drivers must implement this trait in order to get a PCI driver registered. Please refer to the
+/// `Adapter` documentation for an example.
+pub trait DriverNew: Send {
+    /// Driver's data attached to each bound device.
+    type Data;
+
+    /// The type holding information about each device id supported by the driver.
+    // TODO: Use `associated_type_defaults` once stabilized:
+    //
+    // ```
+    // type IdInfo: 'static = ();
+    // ```
+    type IdInfo: 'static;
+
+    /// The table of device ids supported by the driver.
+    const ID_TABLE: IdTable<Self::IdInfo>;
+
+    /// PCI driver probe.
+    ///
+    /// Called when a new pci device is added or discovered. Implementers should
+    /// attempt to initialize the device here.
+    fn probe(
+        &self,
+        dev: &Device<device::Core>,
+        id_info: &Self::IdInfo,
+    ) -> impl PinInit<Self::Data, Error>;
+
+    /// PCI driver unbind.
+    ///
+    /// Called when a [`Device`] is unbound from its bound [`Driver`]. Implementing this callback
+    /// is optional.
+    ///
+    /// This callback serves as a place for drivers to perform teardown operations that require a
+    /// `&Device<Core>` or `&Device<Bound>` reference. For instance, drivers may try to perform I/O
+    /// operations to gracefully tear down the device.
+    ///
+    /// Otherwise, release operations for driver resources should be performed in `Self::drop`.
+    fn unbind(&self, dev: &Device<device::Core>, this: Pin<&Self::Data>) {
+        let _ = (dev, this);
+    }
 }
 
 /// The PCI driver trait.
