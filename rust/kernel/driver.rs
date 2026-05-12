@@ -117,6 +117,9 @@ use crate::{
 /// - A call to [`RegistrationOps::unregister`] for a given instance of `DriverType` is only valid if
 ///   a preceding call to [`RegistrationOps::register`] has been successful.
 pub unsafe trait RegistrationOps {
+    /// The type of the registration's data.
+    type RegistrationData;
+
     /// The type of the driver's device private data.
     type DriverData;
 
@@ -125,7 +128,7 @@ pub unsafe trait RegistrationOps {
     /// # Safety
     ///
     /// Only called by `Registration`.
-    unsafe fn init() -> impl PinInit<Self>;
+    unsafe fn init(data: Self::RegistrationData) -> impl PinInit<Self>;
 
     /// Get the `bindings::device_driver` embedded.
     fn as_device_driver(&self) -> *mut bindings::device_driver;
@@ -191,11 +194,15 @@ impl<T: RegistrationOps + 'static> Registration<T> {
         unsafe { (*base).p_cb.post_unbind_rust = Some(Self::post_unbind_callback) };
     }
 
-    /// Creates a new instance of the registration object.
-    pub fn new(name: &'static CStr, module: &'static ThisModule) -> impl PinInit<Self, Error> {
+    /// Creates a new instance of the registration object with registration data.
+    pub fn with_data(
+        name: &'static CStr,
+        module: &'static ThisModule,
+        data: T::RegistrationData,
+    ) -> impl PinInit<Self, Error> {
         try_pin_init!(Self {
             // SAFETY: calling from `Registration`.
-            reg <- unsafe { T::init() },
+            reg <- unsafe { T::init(data) },
             _: {
                 Self::callbacks_attach(&*reg);
 
@@ -203,6 +210,14 @@ impl<T: RegistrationOps + 'static> Registration<T> {
                 unsafe { reg.register(name, module)? }
             }
         })
+    }
+
+    /// Creates a new instance of the registration object.
+    pub fn new(name: &'static CStr, module: &'static ThisModule) -> impl PinInit<Self, Error>
+    where
+        T::RegistrationData: Default,
+    {
+        Self::with_data(name, module, Default::default())
     }
 }
 

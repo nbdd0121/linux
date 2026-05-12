@@ -48,9 +48,10 @@ pub struct Adapter<T: Driver> {
 // - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
 //   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
+    type RegistrationData = ();
     type DriverData = T;
 
-    unsafe fn init() -> impl PinInit<Self> {
+    unsafe fn init((): ()) -> impl PinInit<Self> {
         init!(Self {
             adrv: Opaque::zeroed(),
             phantom: PhantomData,
