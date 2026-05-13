@@ -121,7 +121,9 @@ pub unsafe trait RegistrationOps {
     type RegistrationData;
 
     /// The type of the driver's device private data.
-    type DriverData;
+    type DriverData<'bound>
+    where
+        Self: 'bound;
 
     /// Create an instance of the driver.
     ///
@@ -183,7 +185,7 @@ impl<T: RegistrationOps> Registration<T> {
         //
         // SAFETY: By the safety requirements of the `Driver` trait, `T::DriverData` is the
         // driver's device private data type.
-        drop(unsafe { dev.drvdata_obtain::<T::DriverData>() });
+        drop(unsafe { dev.drvdata_obtain::<T::DriverData<'_>>() });
     }
 
     /// Attach generic `struct device_driver` callbacks.

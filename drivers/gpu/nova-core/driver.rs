@@ -32,10 +32,11 @@ use crate::gpu::Gpu;
 static AUXILIARY_ID_COUNTER: Atomic<u32> = Atomic::new(0);
 
 #[pin_data]
-pub(crate) struct NovaCore {
+pub(crate) struct NovaCore<'bound> {
     #[pin]
     pub(crate) gpu: Gpu,
     _reg: Devres<auxiliary::Registration<()>>,
+    debugfs: &'bound debugfs::Dir,
 }
 
 pub(crate) struct NovaCoreDriver<'module> {
@@ -80,15 +81,19 @@ kernel::pci_device_table!(
 );
 
 impl pci::DriverNew for NovaCoreDriver<'_> {
-    type Data = NovaCore;
+    type Data<'bound>
+        = NovaCore<'bound>
+    where
+        Self: 'bound;
+
     type IdInfo = ();
     const ID_TABLE: pci::IdTable<Self::IdInfo> = &PCI_TABLE;
 
-    fn probe(
-        &self,
-        pdev: &pci::Device<Core>,
+    fn probe<'bound>(
+        &'bound self,
+        pdev: &'bound pci::Device<Core>,
         _info: &Self::IdInfo,
-    ) -> impl PinInit<NovaCore, Error> {
+    ) -> impl PinInit<NovaCore<'bound>, Error> {
         pin_init::pin_init_scope(move || {
             dev_dbg!(pdev, "Probe Nova Core GPU driver.\n");
 
@@ -116,11 +121,12 @@ impl pci::DriverNew for NovaCoreDriver<'_> {
                     crate::MODULE_NAME,
                     (),
                 )?,
+                debugfs: self.debugfs,
             }))
         })
     }
 
-    fn unbind(&self, pdev: &pci::Device<Core>, this: Pin<&NovaCore>) {
+    fn unbind(&self, pdev: &pci::Device<Core>, this: Pin<&NovaCore<'_>>) {
         this.gpu.unbind(pdev.as_ref());
     }
 }

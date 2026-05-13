@@ -67,7 +67,10 @@ pub struct AdapterNew<T: DriverNew> {
 //   a preceding call to `register` has been successful.
 unsafe impl<T: DriverNew> driver::RegistrationOps for AdapterNew<T> {
     type RegistrationData = T;
-    type DriverData = T::Data;
+    type DriverData<'bound>
+        = T::Data<'bound>
+    where
+        Self: 'bound;
 
     unsafe fn init(data: T) -> impl PinInit<Self> {
         init!(Self {
@@ -143,7 +146,7 @@ impl<T: DriverNew> AdapterNew<T> {
         // SAFETY: `remove_callback` is only ever called after a successful call to
         // `probe_callback`, hence it's guaranteed that `Device::set_drvdata()` has been called
         // and stored a `Pin<KBox<T>>`.
-        let data = unsafe { pdev.as_ref().drvdata_borrow::<T::Data>() };
+        let data = unsafe { pdev.as_ref().drvdata_borrow::<T::Data<'_>>() };
 
         T::unbind(&this.data, pdev, data);
     }
@@ -159,22 +162,18 @@ impl<T> Default for Compat<T> {
     }
 }
 
-impl<T: Driver> DriverNew for Compat<T> {
-    type Data = T;
+impl<T: Driver + 'static> DriverNew for Compat<T> {
+    type Data<'bound> = T;
 
     type IdInfo = T::IdInfo;
 
     const ID_TABLE: IdTable<Self::IdInfo> = T::ID_TABLE;
 
-    fn probe(
-        &self,
-        dev: &Device<device::Core>,
-        id_info: &Self::IdInfo,
-    ) -> impl PinInit<Self::Data, Error> {
+    fn probe(&self, dev: &Device<device::Core>, id_info: &Self::IdInfo) -> impl PinInit<T, Error> {
         T::probe(dev, id_info)
     }
 
-    fn unbind(&self, dev: &Device<device::Core>, this: Pin<&Self::Data>) {
+    fn unbind(&self, dev: &Device<device::Core>, this: Pin<&T>) {
         T::unbind(dev, this);
     }
 }
@@ -339,7 +338,9 @@ macro_rules! pci_device_table {
 /// `Adapter` documentation for an example.
 pub trait DriverNew: Send {
     /// Driver's data attached to each bound device.
-    type Data;
+    type Data<'bound>: 'bound
+    where
+        Self: 'bound;
 
     /// The type holding information about each device id supported by the driver.
     // TODO: Use `associated_type_defaults` once stabilized:
@@ -356,11 +357,11 @@ pub trait DriverNew: Send {
     ///
     /// Called when a new pci device is added or discovered. Implementers should
     /// attempt to initialize the device here.
-    fn probe(
-        &self,
-        dev: &Device<device::Core>,
+    fn probe<'bound>(
+        &'bound self,
+        dev: &'bound Device<device::Core>,
         id_info: &Self::IdInfo,
-    ) -> impl PinInit<Self::Data, Error>;
+    ) -> impl PinInit<Self::Data<'bound>, Error>;
 
     /// PCI driver unbind.
     ///
@@ -372,7 +373,11 @@ pub trait DriverNew: Send {
     /// operations to gracefully tear down the device.
     ///
     /// Otherwise, release operations for driver resources should be performed in `Self::drop`.
-    fn unbind(&self, dev: &Device<device::Core>, this: Pin<&Self::Data>) {
+    fn unbind<'bound>(
+        &'bound self,
+        dev: &'bound Device<device::Core>,
+        this: Pin<&Self::Data<'bound>>,
+    ) {
         let _ = (dev, this);
     }
 }

@@ -44,7 +44,7 @@ pub struct Adapter<T: Driver> {
 //   a preceding call to `register` has been successful.
 unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
     type RegistrationData = ();
-    type DriverData = T;
+    type DriverData<'bound> = T;
 
     unsafe fn init((): ()) -> impl PinInit<Self> {
         init!(Self {
