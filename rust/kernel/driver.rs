@@ -195,14 +195,16 @@ impl<T: RegistrationOps> Registration<T> {
     }
 
     /// Creates a new instance of the registration object with registration data.
-    pub fn with_data(
+    ///
+    /// # Safety
+    ///
+    /// Constructed `Self` must be dropped before lifetime it captures expire, i.e. it must not be
+    /// forgotten.
+    pub unsafe fn with_data_lt(
         name: &'static CStr,
         module: &'static ThisModule,
         data: T::RegistrationData,
-    ) -> impl PinInit<Self, Error>
-    where
-        T: 'static,
-    {
+    ) -> impl PinInit<Self, Error> {
         try_pin_init!(Self {
             // SAFETY: calling from `Registration`.
             reg <- unsafe { T::init(data) },
@@ -213,6 +215,19 @@ impl<T: RegistrationOps> Registration<T> {
                 unsafe { reg.register(name, module)? }
             }
         })
+    }
+
+    /// Creates a new instance of the registration object with registration data.
+    pub fn with_data(
+        name: &'static CStr,
+        module: &'static ThisModule,
+        data: T::RegistrationData,
+    ) -> impl PinInit<Self, Error>
+    where
+        T: 'static,
+    {
+        // SAFETY: No lifetime captured due to `'static` bound.
+        unsafe { Self::with_data_lt(name, module, data) }
     }
 
     /// Creates a new instance of the registration object.
