@@ -65,7 +65,7 @@ pub struct AdapterNew<T: DriverNew> {
 // - `T` is the type of the driver's device private data.
 // - A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
 //   a preceding call to `register` has been successful.
-unsafe impl<T: DriverNew + 'static> driver::RegistrationOps for AdapterNew<T> {
+unsafe impl<T: DriverNew> driver::RegistrationOps for AdapterNew<T> {
     type RegistrationData = T;
     type DriverData = T::Data;
 
@@ -103,7 +103,7 @@ unsafe impl<T: DriverNew + 'static> driver::RegistrationOps for AdapterNew<T> {
     }
 }
 
-impl<T: DriverNew + 'static> AdapterNew<T> {
+impl<T: DriverNew> AdapterNew<T> {
     extern "C" fn probe_callback(
         pdev: *mut bindings::pci_dev,
         id: *const bindings::pci_device_id,
