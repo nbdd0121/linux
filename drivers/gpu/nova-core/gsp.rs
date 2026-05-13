@@ -130,7 +130,7 @@ pub(crate) struct Gsp {
 impl Gsp {
     // Creates an in-place initializer for a `Gsp` manager for `pdev`.
     pub(crate) fn new<'a>(
-        driver: &'a super::driver::NovaCoreDriver,
+        driver: &'a super::driver::NovaCoreDriver<'_>,
         pdev: &'a pci::Device<device::Bound>,
     ) -> impl PinInit<Self, Error> + 'a {
         pin_init::pin_init_scope(move || {

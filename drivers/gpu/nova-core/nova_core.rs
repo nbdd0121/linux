@@ -33,7 +33,8 @@ struct NovaCoreModule {
     // Fields are dropped in declaration order, so `_driver` is dropped first,
     // then `_debugfs_guard` clears `DEBUGFS_ROOT`.
     #[pin]
-    _driver: Registration<pci::AdapterNew<driver::NovaCoreDriver>>,
+    _driver: Registration<pci::AdapterNew<driver::NovaCoreDriver<'debugfs>>>,
+    debugfs: debugfs::Dir,
 }
 
 impl InPlaceModule for NovaCoreModule {
@@ -41,9 +42,13 @@ impl InPlaceModule for NovaCoreModule {
         let debugfs = debugfs::Dir::new(kernel::c_str!("nova_core"));
 
         try_pin_init!(Self {
-            _driver <- Registration::with_data(MODULE_NAME, module, driver::NovaCoreDriver {
-                debugfs,
-            }),
+            debugfs,
+            // SAFETY: `Registration` is not forgotten.
+            _driver <- unsafe {
+                Registration::with_data_lt(MODULE_NAME, module, driver::NovaCoreDriver {
+                    debugfs,
+                })
+            },
         })
     }
 }

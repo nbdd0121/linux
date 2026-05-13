@@ -242,7 +242,7 @@ pub(crate) struct Gpu {
 
 impl Gpu {
     pub(crate) fn new<'a>(
-        driver: &'a super::driver::NovaCoreDriver,
+        driver: &'a super::driver::NovaCoreDriver<'_>,
         pdev: &'a pci::Device<device::Bound>,
         devres_bar: Arc<Devres<Bar0>>,
         bar: &'a Bar0,

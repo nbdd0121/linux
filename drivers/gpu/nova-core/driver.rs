@@ -38,8 +38,8 @@ pub(crate) struct NovaCore {
     _reg: Devres<auxiliary::Registration<()>>,
 }
 
-pub(crate) struct NovaCoreDriver {
-    pub(crate) debugfs: debugfs::Dir,
+pub(crate) struct NovaCoreDriver<'module> {
+    pub(crate) debugfs: &'module debugfs::Dir,
 }
 
 const BAR0_SIZE: usize = SZ_16M;
@@ -57,7 +57,7 @@ pub(crate) type Bar0 = pci::Bar<BAR0_SIZE>;
 kernel::pci_device_table!(
     PCI_TABLE,
     MODULE_PCI_TABLE,
-    <NovaCoreDriver as pci::DriverNew>::IdInfo,
+    <NovaCoreDriver<'_> as pci::DriverNew>::IdInfo,
     [
         // Modern NVIDIA GPUs will show up as either VGA or 3D controllers.
         (
@@ -79,7 +79,7 @@ kernel::pci_device_table!(
     ]
 );
 
-impl pci::DriverNew for NovaCoreDriver {
+impl pci::DriverNew for NovaCoreDriver<'_> {
     type Data = NovaCore;
     type IdInfo = ();
     const ID_TABLE: pci::IdTable<Self::IdInfo> = &PCI_TABLE;
