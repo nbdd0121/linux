@@ -939,6 +939,7 @@ enum {
 	FI_ATOMIC_REPLACE,	/* indicate atomic replace */
 	FI_OPENED_FILE,		/* indicate file has been opened */
 	FI_DONATE_FINISHED,	/* indicate page donation of file has been finished */
+	FI_ZERO_POST_EOF,	/* indicate unaligned EOF gap was zeroed in pagecache */
 	FI_MAX,			/* max flag, never be used */
 };
 
