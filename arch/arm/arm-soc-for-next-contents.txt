@@ -1,9 +1,30 @@
 soc/arm
+	patch
+		ARM: use CONFIG_AEABI by default everywhere
+		ARM: limit OABI support to StrongARM CPUs
+		ARM: rework ARM11 CPU selection logic
+		ARM: deprecate support for ARM1136r0
+		ARM: turn CONFIG_ATAGS off by default
+		ARM: mark CPU_ENDIAN_BE8 as deprecated
+		ARM: update DEPRECATED_PARAM_STRUCT removal timeline
+		ARM: s3c64xx: extend deprecation schedule
+		ARM: update FPE_NWFPE help text
+		ARM: mark IWMMXT as deprecated
+		ARM: mark ARCH_DOVE as deprecated
+		ARM: PXA: mark remaining board files as deprecated
+		ARM: orion5x: mark all board files as deprecated
+		ARM: mark mach-sa1100 as deprecated
+		ARM: mark RiscPC as deprecated
+		ARM: mark footbridge as deprecated
+		ARM: mark Cortex-M3/M4/M7 based boards as deprecated
+		ARM: mark axxia platform as deprecated
+		ARM: mark mv78xx0 support as deprecated
 
 soc/dt
 	patch
 		ARM: dts: st: spear: Correct indentation
 		ARM: dts: st: ste: Correct indentation
+		ARM: dts: st: spear13xx: Drop unused/incorrect usbh0_id and usbh1_id
 
 soc/drivers
 
