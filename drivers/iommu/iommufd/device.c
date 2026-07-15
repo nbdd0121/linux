@@ -148,29 +148,22 @@ static void iommufd_device_remove_vdev(struct iommufd_device *idev)
 	if (!idev->vdev)
 		goto out_unlock;
 
-	vdev = iommufd_get_vdevice(idev->ictx, idev->vdev->obj.id);
+	vdev = idev->vdev;
+
 	/*
 	 * An ongoing vdev destroy ioctl has removed the vdev from the object
 	 * xarray, but has not finished iommufd_vdevice_destroy() yet as it
 	 * needs the same mutex. We exit the locking then wait on wait_cnt
 	 * reference for the vdev destruction.
 	 */
-	if (IS_ERR(vdev))
+	if (iommufd_try_inc_users(idev->ictx, &vdev->obj))
 		goto out_unlock;
-
-	/* Should never happen */
-	if (WARN_ON(vdev != idev->vdev)) {
-		iommufd_put_object(idev->ictx, &vdev->obj);
-		goto out_unlock;
-	}
 
 	/*
 	 * vdev is still alive. Hold a users refcount to prevent racing with
 	 * userspace destruction, then use iommufd_object_tombstone_user() to
 	 * destroy it and leave a tombstone.
 	 */
-	refcount_inc(&vdev->obj.users);
-	iommufd_put_object(idev->ictx, &vdev->obj);
 	mutex_unlock(&idev->igroup->lock);
 	iommufd_object_tombstone_user(idev->ictx, &vdev->obj);
 	return;
@@ -989,7 +982,7 @@ out_put_pt_obj:
  * iommufd_device_attach - Connect a device/pasid to an iommu_domain
  * @idev: device to attach
  * @pasid: pasid to attach
- * @pt_id: Input a IOMMUFD_OBJ_IOAS, or IOMMUFD_OBJ_HWPT_PAGING
+ * @pt_id: Input an IOMMUFD_OBJ_IOAS, or IOMMUFD_OBJ_HWPT_PAGING
  *         Output the IOMMUFD_OBJ_HWPT_PAGING ID
  *
  * This connects the device/pasid to an iommu_domain, either automatically
@@ -1022,7 +1015,7 @@ EXPORT_SYMBOL_NS_GPL(iommufd_device_attach, "IOMMUFD");
  * iommufd_device_replace - Change the device/pasid's iommu_domain
  * @idev: device to change
  * @pasid: pasid to change
- * @pt_id: Input a IOMMUFD_OBJ_IOAS, or IOMMUFD_OBJ_HWPT_PAGING
+ * @pt_id: Input an IOMMUFD_OBJ_IOAS, or IOMMUFD_OBJ_HWPT_PAGING
  *         Output the IOMMUFD_OBJ_HWPT_PAGING ID
  *
  * This is the same as::
@@ -1044,7 +1037,7 @@ int iommufd_device_replace(struct iommufd_device *idev, ioasid_t pasid,
 EXPORT_SYMBOL_NS_GPL(iommufd_device_replace, "IOMMUFD");
 
 /**
- * iommufd_device_detach - Disconnect a device/device to an iommu_domain
+ * iommufd_device_detach - Disconnect a device/pasid from an iommu_domain
  * @idev: device to detach
  * @pasid: pasid to detach
  *
