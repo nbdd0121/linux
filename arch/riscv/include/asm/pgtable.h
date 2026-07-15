@@ -559,12 +559,25 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 #define pgd_ERROR(e) \
 	pr_err("%s:%d: bad pgd " PTE_FMT ".\n", __FILE__, __LINE__, pgd_val(e))
 
+static inline void __update_mmu_cache_range_svinval(struct vm_area_struct *vma,
+		unsigned long address, unsigned int nr)
+{
+	int i;
+	unsigned long asid = get_mm_asid(vma->vm_mm);
+
+	local_sfence_w_inval();
+	for (i = 0; i < nr; i++)
+		local_sinval_vma(address + nr * PAGE_SIZE, asid);
+	local_sfence_inval_ir();
+}
 
 /* Commit new configuration to MMU hardware */
 static inline void update_mmu_cache_range(struct vm_fault *vmf,
 		struct vm_area_struct *vma, unsigned long address,
 		pte_t *ptep, unsigned int nr)
 {
+	unsigned long asid;
+
 	/*
 	 * Svvptc guarantees that the new valid pte will be visible within
 	 * a bounded timeframe, so when the uarch does not cache invalid
@@ -573,6 +586,11 @@ static inline void update_mmu_cache_range(struct vm_fault *vmf,
 	if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SVVPTC))
 		return;
 
+	if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SVINVAL)) {
+		__update_mmu_cache_range_svinval(vma, address, nr);
+		return;
+	}
+
 	/*
 	 * The kernel assumes that TLBs don't cache invalid entries, but
 	 * in RISC-V, SFENCE.VMA specifies an ordering constraint, not a
@@ -580,10 +598,11 @@ static inline void update_mmu_cache_range(struct vm_fault *vmf,
 	 * Relying on flush_tlb_fix_spurious_fault would suffice, but
 	 * the extra traps reduce performance.  So, eagerly SFENCE.VMA.
 	 */
+	asid = get_mm_asid(vma->vm_mm);
 	while (nr--)
-		local_flush_tlb_page(address + nr * PAGE_SIZE);
-
+		local_flush_tlb_page_asid(address + nr * PAGE_SIZE, asid);
 }
+
 #define update_mmu_cache(vma, addr, ptep) \
 	update_mmu_cache_range(NULL, vma, addr, ptep, 1)
 
