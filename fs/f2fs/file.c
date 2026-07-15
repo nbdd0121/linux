@@ -36,21 +36,43 @@
 #include <trace/events/f2fs.h>
 #include <uapi/linux/f2fs.h>
 
+static int fill_zero(struct inode *inode, pgoff_t index,
+					loff_t start, loff_t len);
+
 static void f2fs_zero_post_eof_page(struct inode *inode,
 					loff_t new_size, bool lock)
 {
 	loff_t old_size = i_size_read(inode);
+	unsigned int offset;
 
 	if (old_size >= new_size)
 		return;
 
-	if (mapping_empty(inode->i_mapping))
-		return;
-
 	if (lock)
 		filemap_invalidate_lock(inode->i_mapping);
+
 	/* zero or drop pages only in range of [old_size, new_size] */
 	truncate_inode_pages_range(inode->i_mapping, old_size, new_size);
+
+	/*
+	 * When expanding an unaligned EOF size, zero post-EOF data in
+	 * pagecache and set FI_ZERO_POST_EOF, so following checkpointing
+	 * or fsync can persist correct data to disk before committing
+	 * inode w/ updated i_size.
+	 */
+	if (F2FS_OPTION(F2FS_I_SB(inode)).fsync_mode != FSYNC_MODE_STRICT)
+		goto out_unlock;
+
+	offset = old_size & (PAGE_SIZE - 1);
+	if (offset) {
+		unsigned int len = min_t(loff_t, PAGE_SIZE - offset,
+							new_size - old_size);
+		pgoff_t index = old_size >> PAGE_SHIFT;
+
+		fill_zero(inode, index, offset, len);
+		set_inode_flag(inode, FI_ZERO_POST_EOF);
+	}
+out_unlock:
 	if (lock)
 		filemap_invalidate_unlock(inode->i_mapping);
 }
@@ -303,6 +325,13 @@ static int f2fs_do_sync_file(struct file *file, loff_t start, loff_t end,
 
 	if (S_ISDIR(inode->i_mode))
 		goto go_write;
+
+	if (is_inode_flag_set(inode, FI_ZERO_POST_EOF)) {
+		ret = filemap_write_and_wait(inode->i_mapping);
+		if (ret)
+			return ret;
+		clear_inode_flag(inode, FI_ZERO_POST_EOF);
+	}
 
 	/* if fdatasync is triggered, let's do in-place-update */
 	if (datasync || get_dirty_pages(inode) <= SM_I(sbi)->min_fsync_blocks)
@@ -1107,17 +1136,23 @@ int f2fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			!IS_ALIGNED(attr->ia_size,
 			F2FS_BLK_TO_BYTES(fi->i_cluster_size)))
 			return -EINVAL;
-		/*
-		 * To prevent scattered pin block generation, we don't allow
-		 * smaller/equal size unaligned truncation for pinned file.
-		 * We only support overwrite IO to pinned file, so don't
-		 * care about larger size truncation.
-		 */
-		if (f2fs_is_pinned_file(inode) &&
-			attr->ia_size <= i_size_read(inode) &&
-			!IS_ALIGNED(attr->ia_size,
-			F2FS_BLK_TO_BYTES(CAP_BLKS_PER_SEC(sbi))))
-			return -EINVAL;
+
+		if (f2fs_is_pinned_file(inode)) {
+			/*
+			 * It may break section-aligned fallocate recovery
+			 * mechanism, so do not allow larger size truncation.
+			 */
+			if (attr->ia_size > i_size_read(inode))
+				return -EINVAL;
+			/*
+			 * To prevent scattered pin block generation, we don't
+			 * allow smaller/equal size unaligned truncation for
+			 * pinned file.
+			 */
+			else if (!IS_ALIGNED(attr->ia_size,
+				F2FS_BLK_TO_BYTES(CAP_BLKS_PER_SEC(sbi))))
+				return -EINVAL;
+		}
 	}
 
 	if (is_quota_modification(idmap, inode, attr)) {
