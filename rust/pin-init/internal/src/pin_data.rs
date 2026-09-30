@@ -1501,7 +1501,7 @@ fn generate_projections(info: &StructInfo, exist_lt: &[ExistLt]) -> TokenStream 
             quote! {
                 #vis struct #projection_lt #generics_with_this_field_lt (
                     #(#fields_decl_lt)*
-                    ::core::marker::PhantomData<&'__this mut ()>,
+                    ::core::marker::PhantomData<&'__this mut #ident #ty_generics>,
                 ) #whr;
             },
             quote! {
@@ -1518,7 +1518,7 @@ fn generate_projections(info: &StructInfo, exist_lt: &[ExistLt]) -> TokenStream 
                     #whr
                 {
                     #(#fields_decl_lt)*
-                    ___pin_phantom_data: ::core::marker::PhantomData<&'__this mut ()>,
+                    ___pin_phantom_data: ::core::marker::PhantomData<&'__this mut #ident #ty_generics>,
                 }
             },
             quote! {
@@ -1664,7 +1664,7 @@ fn generate_projections(info: &StructInfo, exist_lt: &[ExistLt]) -> TokenStream 
             quote!(
                 #vis struct #projection_ref_lt #generics_with_this_field_ref_lt(
                     #(#fields_ref_decl_lt)*
-                    ::core::marker::PhantomData<&'__this ()>,
+                    ::core::marker::PhantomData<&'__this #ident #ty_generics>,
                 ) #whr;
             ),
             quote!(
@@ -1681,7 +1681,7 @@ fn generate_projections(info: &StructInfo, exist_lt: &[ExistLt]) -> TokenStream 
                     #whr
                 {
                     #(#fields_ref_decl_lt)*
-                    ___pin_phantom_data: ::core::marker::PhantomData<&'__this ()>,
+                    ___pin_phantom_data: ::core::marker::PhantomData<&'__this #ident #ty_generics>,
                 }
             },
             quote! {
@@ -1897,6 +1897,7 @@ fn generate_the_pin_data(info: &StructInfo) -> TokenStream {
             #whr
         {
             #(#phantom_fields)*
+            __pin_phantom: ::core::marker::PhantomData<#struct_name #ty_generics>,
         }
 
         impl #impl_generics_with_lt ::core::clone::Clone for __PinDataLt #ty_generics_with_field_lt
