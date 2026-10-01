@@ -124,8 +124,8 @@ struct StructInfo {
     field_idx_map: BTreeMap<Ident, usize>,
     is_tuple_struct: bool,
     self_referential: bool,
-    /// Field lifetime generics.
-    field_lts: Generics,
+    /// Field lifetime generics with outlive chain.
+    field_lts_outlive_chain: Generics,
 }
 
 pub(crate) fn expand_with_cfg(
@@ -349,16 +349,20 @@ fn expand(
         .iter()
         .filter_map(|f| Some(f.borrowed.as_ref()?))
         .collect();
-    let field_lts = Generics {
+    let field_lts_outlive_chain = Generics {
         lt_token: None,
         params: borrowed_fields
             .iter()
-            .map(|borrowed| {
+            .zip(std::iter::once(None).chain(borrowed_fields.iter().map(Some)))
+            .map(|(borrowed, prev)| {
                 GenericParam::Lifetime(LifetimeParam {
                     attrs: Vec::new(),
                     lifetime: borrowed.lifetime.clone(),
                     colon_token: None,
-                    bounds: Default::default(),
+                    bounds: prev
+                        .iter()
+                        .map(|borrowed| borrowed.lifetime.clone())
+                        .collect(),
                 })
             })
             .collect(),
@@ -376,7 +380,7 @@ fn expand(
         fields: fields,
         field_idx_map,
         is_tuple_struct,
-        field_lts,
+        field_lts_outlive_chain,
     };
 
     for field in &info.fields {
@@ -673,7 +677,7 @@ fn generate_drop_order_check(dcx: &mut DiagCtxt, info: &StructInfo) -> TokenStre
     // with known lifetime bounds as bounds on the function, and asks Rust to *prove* that the types
     // are wellformed, given the bounds that we understand.
 
-    let generics_with_field_lt = CombinedGenerics(vec![&info.field_lts, generics]);
+    let generics_with_field_lt = CombinedGenerics(vec![&info.field_lts_outlive_chain, generics]);
 
     let (_, ty_generics, _) = generics.split_for_impl();
     let (impl_generics_with_field_lt, _, _) = generics_with_field_lt.split_for_impl();
@@ -692,12 +696,6 @@ fn generate_drop_order_check(dcx: &mut DiagCtxt, info: &StructInfo) -> TokenStre
             continue;
         };
         let field_lt = &borrowed.lifetime;
-
-        // For each borrowed field that borrows from other fields, we need to insert outlive bounds.
-        for capture in &field.captures {
-            let lt = &capture.lifetime;
-            where_clause.predicates.push(parse_quote!(#lt: #field_lt));
-        }
 
         // For each borrowed field that references a generic, we also need to insert their outlive
         // bounds so they can refer to generics.
@@ -847,10 +845,13 @@ fn generate_projections(info: &StructInfo) -> TokenStream {
 
     // Wrap in `CombinedGenerics` because it's ty generics will always output `<>`, so it can be
     // used with `for`.
-    let field_lts = CombinedGenerics(vec![&info.field_lts]);
+    let field_lts = CombinedGenerics(vec![&info.field_lts_outlive_chain]);
     let generics_with_this_lt = CombinedGenerics(vec![&this_lt_generics, generics]);
-    let generics_with_this_field_lt =
-        CombinedGenerics(vec![&this_lt_generics, &info.field_lts, generics]);
+    let generics_with_this_field_lt = CombinedGenerics(vec![
+        &this_lt_generics,
+        &info.field_lts_outlive_chain,
+        generics,
+    ]);
     let (impl_generics, ty_generics, whr) = generics.split_for_impl();
     let (_, field_lt_ty_generics, _) = field_lts.split_for_impl();
     let (_, ty_generics_with_this_lt, _) = generics_with_this_lt.split_for_impl();
@@ -1177,8 +1178,8 @@ fn generate_the_pin_data(info: &StructInfo) -> TokenStream {
 
     // Wrap in `CombinedGenerics` because it's ty generics will always output `<>`, so it can be
     // used with `for`.
-    let field_lts = CombinedGenerics(vec![&info.field_lts]);
-    let generics_with_field_lt = CombinedGenerics(vec![&info.field_lts, generics]);
+    let field_lts = CombinedGenerics(vec![&info.field_lts_outlive_chain]);
+    let generics_with_field_lt = CombinedGenerics(vec![&info.field_lts_outlive_chain, generics]);
 
     let (impl_generics, ty_generics, whr) = generics.split_for_impl();
     let (_, field_lt_ty_generics, _) = field_lts.split_for_impl();
