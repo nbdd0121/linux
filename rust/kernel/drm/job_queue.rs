@@ -632,10 +632,6 @@ impl<'a, T: JobQueueOps + Send + Sync> JobQueue<'a, T> {
 
             *jq.capacity += u64::from(job.cost);
 
-            // This enables the SubmitWorker to complete a job that is not yet
-            // in 'running_jobs', in case of a race against the lock.
-            *jq.last_completed = seqno;
-
             if let Some(fence) = job.fence() {
                 fence.signal(Ok(()));
             } else {
@@ -649,6 +645,9 @@ impl<'a, T: JobQueueOps + Send + Sync> JobQueue<'a, T> {
             // an RCU grace period wait.
         }
 
+        // This enables the SubmitWorker to complete a job that is not yet
+        // in 'running_jobs', in case of a race against the lock.
+        *jq.last_completed = seqno;
         drop(jq_locked);
 
         self.check_start_submit_worker();
