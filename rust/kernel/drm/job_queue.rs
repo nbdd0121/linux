@@ -253,7 +253,11 @@ impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for SubmitWorker<'_, T> {
                     panic!("fence not present.");
                 }
 
-                // We drop this job here directly, from work_item context.
+                // Drop here directly if possible. Otherwise, let the DropWorker
+                // take care of it.
+                if core::mem::needs_drop::<T::JobDataType>() {
+                    jq.drop_list.push_back(job);
+                }
             } else {
                 jq.running_jobs.push_back(job);
             }
@@ -280,8 +284,10 @@ impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for DropWorker<'_, T> {
 
         let mut jq = jq_accessor.lock();
 
-        while let Some(_job) = jq.drop_list.pop_front() {
-            // Droppy-dy-drop
+        while let Some(job) = jq.drop_list.pop_front() {
+            drop(jq); // Release lock.
+            drop(job);
+            jq = jq_accessor.lock(); // Retake lock.
         }
     }
 }
@@ -322,7 +328,7 @@ struct JobQueueInner<'a, T: JobQueueOps + Send + Sync> {
 /// Dropping a JobQueue results in all remaining waiting and running jobs'
 /// fences being signaled with ECANCELED.
 ///
-/// A JobQueue must only ever drop in process context.
+/// A JobQueue must only ever drop in non-atomic / process context.
 ///
 /// # Examples
 ///
@@ -648,7 +654,7 @@ impl<'a, T: JobQueueOps + Send + Sync> JobQueue<'a, T> {
         // This enables the SubmitWorker to complete a job that is not yet
         // in 'running_jobs', in case of a race against the lock.
         *jq.last_completed = seqno;
-        drop(jq_locked);
+        drop(jq);
 
         self.check_start_submit_worker();
         if needs_drop {
@@ -672,6 +678,8 @@ impl<'a, T: JobQueueOps + Send + Sync> JobQueue<'a, T> {
     /// the GPU ring. Besides, the race merely results in these subsequent
     /// jobs being signaled with ECANCELED on drop, thus, maybe differing from
     /// the `error` provided here.
+    ///
+    /// This function must be called from non-atomic context.
     pub fn teardown<E>(self, error: Error)
     where
         Error: From<E>,
@@ -679,12 +687,17 @@ impl<'a, T: JobQueueOps + Send + Sync> JobQueue<'a, T> {
         let jq = self.inner.try_access().unwrap();
         let mut jq = jq.lock();
 
+        // We don't drop the jobs and fences here while we hold the lock. Just
+        // signal with the error. The dropping lists will then drop them locklessly.
+
         while let Some(mut job) = jq.running_jobs.pop_front() {
             if let Some(fence) = job.fence() {
                 fence.signal(Err(error));
             } else {
                 panic!("fence not present.");
             }
+
+            jq.drop_list.push_back(job);
         }
     }
 }
