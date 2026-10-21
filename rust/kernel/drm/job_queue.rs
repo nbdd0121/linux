@@ -164,24 +164,25 @@ impl<'a, T: JobQueueOps + Send + Sync> Job<'a, T> {
     /// A JobQueue will only push a job once `fence` has been signaled.
     pub fn add_dependency(&mut self, fence: &Fence) -> Result {
         self.inner.as_mut().with_project(|job| {
-            job.dependencies.reserve(1, GFP_KERNEL)?;
-
             // If the registration below gets registered successfully, a signaling
             // fence will decrement the atomic. That could race. Thus, increment in
             // advance. Ordering is ensured thanks to the dma_fence backend.
             job.nr_of_deps.fetch_add(1, Relaxed);
 
-            // SAFETY: The `registration` is not forgotten. It drops with JobQueue.
-            let registration = unsafe {
-                FenceCallbackRegistration::new(
-                    fence,
-                    DependencyWaker {
-                        nr_of_deps: job.nr_of_deps,
-                        jq: job.jq,
-                    },
-                )
-            };
-            match KBox::pin_init(registration, GFP_KERNEL) {
+            let dependency = try_pin_init!(Dependency {
+                links <- ListLinks::new(),
+                // SAFETY: The `registration` is not forgotten. It drops with JobQueue.
+                registration <- unsafe {
+                    FenceCallbackRegistration::new(
+                        fence,
+                        DependencyWaker {
+                            nr_of_deps: job.nr_of_deps,
+                            jq: job.jq,
+                        },
+                    )
+                }
+            });
+            match UniqueArc::pin_init(dependency, GFP_KERNEL) {
                 Err(e) => {
                     let _ = job.nr_of_deps.fetch_sub(1, Relaxed);
                     if e == ENOENT {
@@ -191,11 +192,7 @@ impl<'a, T: JobQueueOps + Send + Sync> Job<'a, T> {
                     return Err(e);
                 }
                 Ok(dep) => {
-                    if let Err(e) = job.dependencies.push_within_capacity(dep) {
-                        // Impossible because of the reservation.
-                        pr_err!("Job::add_dependency(): reserved memory not available.\n");
-                        return Err(e.into());
-                    }
+                    job.dependencies.push_back(dep);
                 }
             }
 
@@ -252,6 +249,21 @@ impl<'a, T: JobQueueOps + Send + Sync> Job<'a, T> {
 }
 
 #[pin_data]
+struct Dependency<'b, 'nr_of_deps, T: JobQueueOps + Send + Sync> {
+    #[pin]
+    links: ListLinks,
+    #[pin]
+    registration: FenceCallbackRegistration<DependencyWaker<'b, 'nr_of_deps, T>>,
+}
+
+impl_list_arc_safe! {
+    impl{'b, T: JobQueueOps + Send + Sync} ListArcSafe<0> for Dependency<'b, '_, T> { untracked; }
+}
+impl_list_item! {
+    impl{'b, T: JobQueueOps + Send + Sync} ListItem<0> for Dependency<'b, '_, T> { using ListLinks { self.links }; }
+}
+
+#[pin_data]
 #[repr(C)]
 struct JobInternal<'b, T: JobQueueOps + Send + Sync> {
     #[pin]
@@ -259,7 +271,7 @@ struct JobInternal<'b, T: JobQueueOps + Send + Sync> {
     cost: u32,
     fence_allocation: Option<DriverFenceAllocation<'b, DriverDataWrapper<T>>>,
     fence: Option<DriverFence<'b, DriverDataWrapper<T>>>,
-    dependencies: KVec<Pin<KBox<FenceCallbackRegistration<DependencyWaker<'b, 'nr_of_deps, T>>>>>,
+    dependencies: UniqueList<Dependency<'b, 'nr_of_deps, T>>,
     nr_of_deps: Atomic<u32>,
     jq: &'b JobQueue<T>,
 }
@@ -598,7 +610,7 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
             fence_allocation: Some(fence_allocation),
             fence: None,
             nr_of_deps: Atomic::new(0),
-            dependencies <- KVec::new(),
+            dependencies: UniqueList::new(),
             jq: &self,
         });
 
