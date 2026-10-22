@@ -160,6 +160,7 @@ impl<'b, T: JobQueueOps + Send + Sync> FenceCallback for DependencyWaker<'b, '_,
 /// This is only useful for registering dependencies on and for submitting it.
 pub struct Job<'a, T: JobQueueOps + Send + Sync> {
     inner: Pin<UniqueArc<JobInternal<'a, T>>>,
+    fence_allocation: DriverFenceAllocation<'a, DriverDataWrapper<T>>,
 }
 
 impl<'a, T: JobQueueOps + Send + Sync> Job<'a, T> {
@@ -224,24 +225,16 @@ impl<'a, T: JobQueueOps + Send + Sync> Job<'a, T> {
             // `inner`, which may borrow from `fctx` but not the full `JobQueue`. So on surface this
             // would be incorrect. However, as we drain `inner` inside `JobQueue::drop`, the
             // reference is gone before any field is destructed.
-            let job = unsafe { core::mem::transmute::<Job<'_, T>, Job<'_, T>>(self) };
+            let mut job = unsafe { core::mem::transmute::<Job<'_, T>, Job<'_, T>>(self) };
 
             // The lock orders setting of the sequence number, so no driver lock is needed.
             let mut inner = inner.lock();
-            let mut job = job.inner;
-            let fence = job
-                .as_mut()
-                .project()
-                .fence_allocation
-                .take()
-                .expect("fence_allocation not present")
-                .new_fence();
-
+            let fence = job.fence_allocation.new_fence();
             let ret_fence = ARef::from(fence.as_fence());
 
-            *job.as_mut().project().fence = Some(fence);
+            *job.inner.as_mut().project().fence = Some(fence);
 
-            inner.waiting_jobs.push_back(job);
+            inner.waiting_jobs.push_back(job.inner);
             drop(inner);
             jq.check_start_submit_worker();
 
@@ -271,7 +264,6 @@ struct JobInternal<'b, T: JobQueueOps + Send + Sync> {
     #[pin]
     links: ListLinks,
     cost: u32,
-    fence_allocation: Option<DriverFenceAllocation<'b, DriverDataWrapper<T>>>,
     fence: Option<DriverFence<'b, DriverDataWrapper<T>>>,
     dependencies: UniqueList<Dependency<'b, 'nr_of_deps, T>>,
     nr_of_deps: Atomic<u32>,
@@ -317,32 +309,22 @@ impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for SubmitWorker<'_, '_, T> {
             }
             *jq.as_mut().project().capacity = new_capacity as u64;
 
-            let seqno = job
-                .fence
-                .as_ref()
-                .expect("fence not present")
-                .as_fence()
-                .seqno();
+            let fence = job.fence.as_ref().expect("fence not present");
+            let seqno = fence.as_fence().seqno();
             let runnable_job = JobRunnable {
                 seqno,
-                data: job.fence.as_ref().expect("fence not present").deref(),
+                data: fence.deref(),
             };
 
-            let jq_data = work.fctx.deref().deref();
-
             drop(jq); // Release lock.
-            T::run_job(jq_data, runnable_job);
+            T::run_job(work.fctx, runnable_job);
             jq = work.inner.lock(); // Retake lock.
 
             // run_job() above needs to be called without lock protection. Thus,
             // it is possible that the driver instructed completion right before
             // we could re-take the lock.
             if jq.last_completed >= seqno {
-                if let Some(fence) = &job.fence {
-                    fence.signal(Ok(()));
-                } else {
-                    panic!("fence not present.");
-                }
+                fence.signal(Ok(()));
 
                 // Drop here directly if possible. Otherwise, let the DropWorker
                 // take care of it.
@@ -624,7 +606,6 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
         let job = try_pin_init!(JobInternal {
             links <- ListLinks::new(),
             cost,
-            fence_allocation: Some(fence_allocation),
             fence: None,
             nr_of_deps: Atomic::new(0),
             dependencies: UniqueList::new(),
@@ -633,7 +614,10 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
 
         let inner = UniqueArc::pin_init(job, GFP_KERNEL)?;
 
-        Ok(Job { inner })
+        Ok(Job {
+            inner,
+            fence_allocation,
+        })
     }
 
     fn check_start_submit_worker(&self) {
@@ -691,11 +675,8 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
 
                 *jq.capacity += u64::from(job.cost);
 
-                if let Some(fence) = &job.fence {
-                    fence.signal(Ok(()));
-                } else {
-                    panic!("fence not present.");
-                }
+                let fence = job.fence.as_ref().expect("fence not present");
+                fence.signal(Ok(()));
 
                 if needs_drop {
                     jq.drop_list.push_back(job);
@@ -745,11 +726,8 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
             // signal with the error. The dropping lists will then drop them locklessly.
 
             while let Some(job) = jq.running_jobs.pop_front() {
-                if let Some(fence) = &job.fence {
-                    fence.signal(Err(error));
-                } else {
-                    panic!("fence not present.");
-                }
+                let fence = job.fence.as_ref().expect("fence not present");
+                fence.signal(Err(error));
 
                 jq.drop_list.push_back(job);
             }
