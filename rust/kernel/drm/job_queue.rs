@@ -80,8 +80,8 @@ use kernel::{
         ListItem,
         ListLinks, //
     },
+    new_srcu,
     prelude::*,
-    revocable::Revocable,
     str::CString,
     sync::{
         aref::ARef,
@@ -92,6 +92,10 @@ use kernel::{
         new_spinlock_irq,
         SpinLockIrq,
     }, //
+    sync::{
+        atomic::AtomicFlag,
+        Srcu, //
+    },
     sync::{Arc, UniqueArc},
     workqueue::{
         self,
@@ -222,8 +226,6 @@ impl<'a, T: JobQueueOps + Send + Sync> Job<'a, T> {
             // reference is gone before any field is destructed.
             let job = unsafe { core::mem::transmute::<Job<'_, T>, Job<'_, T>>(self) };
 
-            // unwrap() can't fire because `self` is valid.
-            let inner = inner.try_access().unwrap();
             // The lock orders setting of the sequence number, so no driver lock is needed.
             let mut inner = inner.lock();
             let mut job = job.inner;
@@ -284,18 +286,21 @@ impl_list_item! {
 }
 
 struct SubmitWorker<'a, 'fctx, T: JobQueueOps + Send + Sync> {
-    inner: &'a Revocable<SpinLockIrq<JobQueueInner<'fctx, T>>>,
+    srcu: &'a Srcu,
+    revoked: &'a AtomicFlag,
+    inner: &'a SpinLockIrq<JobQueueInner<'fctx, T>>,
     fctx: &'fctx FenceContext<DriverDataWrapper<T>>,
 }
 
 impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for SubmitWorker<'_, '_, T> {
     fn run(work: &ScopedWorkRef<Self>) {
-        // Prevent work-item UAF if the JQ is trying to drop right now.
-        let Some(jq_accessor) = work.inner.try_access() else {
+        // Synchronize against revocation in `JobQueue::drop`.
+        let _lock_guard = work.srcu.read_lock();
+        if work.revoked.load(Relaxed) {
             return;
-        };
+        }
 
-        let mut jq = jq_accessor.lock();
+        let mut jq = work.inner.lock();
 
         while let Some(job) = jq.as_mut().project().waiting_jobs.pop_front() {
             // While we didn't hold the lock below for `run_job()`, it could be
@@ -327,7 +332,7 @@ impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for SubmitWorker<'_, '_, T> {
 
             drop(jq); // Release lock.
             T::run_job(jq_data, runnable_job);
-            jq = jq_accessor.lock(); // Retake lock.
+            jq = work.inner.lock(); // Retake lock.
 
             // run_job() above needs to be called without lock protection. Thus,
             // it is possible that the driver instructed completion right before
@@ -352,26 +357,25 @@ impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for SubmitWorker<'_, '_, T> {
 }
 
 struct DropWorker<'a, 'fctx, T: JobQueueOps + Send + Sync> {
-    inner: &'a Revocable<SpinLockIrq<JobQueueInner<'fctx, T>>>,
+    srcu: &'a Srcu,
+    revoked: &'a AtomicFlag,
+    inner: &'a SpinLockIrq<JobQueueInner<'fctx, T>>,
 }
 
 impl<T: JobQueueOps + Send + Sync> ScopedWorkItem for DropWorker<'_, '_, T> {
     fn run(work: &ScopedWorkRef<Self>) {
-        // Contrary to the SubmitWorker, this worker would probably never need
-        // this revocable guard, since the worker is cancelled synchronously
-        // once the JQ drops. It cannot be restarted when JQ is dropping.
-        // But the inner JQ needs to be accessed through Revocable anyways, so
-        // we get more robustness for free.
-        let Some(jq_accessor) = work.inner.try_access() else {
+        // Synchronize against revocation in `JobQueue::drop`.
+        let _lock_guard = work.srcu.read_lock();
+        if work.revoked.load(Relaxed) {
             return;
-        };
+        }
 
-        let mut jq = jq_accessor.lock();
+        let mut jq = work.inner.lock();
 
         while let Some(job) = jq.drop_list.pop_front() {
             drop(jq); // Release lock.
             drop(job);
-            jq = jq_accessor.lock(); // Retake lock.
+            jq = work.inner.lock(); // Retake lock.
         }
     }
 }
@@ -493,17 +497,19 @@ struct JobQueueInner<'a, T: JobQueueOps + Send + Sync> {
 #[pin_data(PinnedDrop)]
 pub struct JobQueue<T: JobQueueOps + Send + Sync> {
     #[pin]
-    #[uses('_: invariant)]
+    #[uses('_: invariant, 'revoked: invariant, 'srcu: invariant)]
     drop_worker: ScopedWork<DropWorker<'inner, 'fctx, T>>,
     #[pin]
     #[uses('_: invariant)]
     submit_worker: ScopedWork<SubmitWorker<'inner, 'fctx, T>>,
     #[pin]
-    // Revocable to prevent work-item UAF on `inner`.
     #[uses('fctx: invariant)]
-    inner: Revocable<SpinLockIrq<JobQueueInner<'fctx, T>>>,
+    inner: SpinLockIrq<JobQueueInner<'fctx, T>>,
     #[pin]
     fctx: FenceContext<DriverDataWrapper<T>>,
+    revoked: AtomicFlag,
+    #[pin]
+    srcu: Srcu,
 }
 
 // SAFETY: The JobQueue is locked and pinned.
@@ -582,16 +588,27 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
         E: From<Infallible>,
     {
         try_pin_init!(Self {
+            srcu <- new_srcu!(),
+            revoked: AtomicFlag::new(false),
             fctx <- FenceContext::new(initial_seqno, &driver_name, &timeline_name, DriverDataWrapper::new(data)),
-            inner <- Revocable::new(new_spinlock_irq!(try_pin_init!(JobQueueInner {
+            inner <- new_spinlock_irq!(try_pin_init!(JobQueueInner {
                 capacity,
                 last_completed: 0,
                 waiting_jobs: UniqueList::new(),
                 running_jobs: UniqueList::new(),
                 drop_list: UniqueList::new(),
-            }))),
-            submit_worker <- new_scoped_work!("JobQueueSubmitWorker", Ok(SubmitWorker { inner: Pin::get_ref(inner), fctx: Pin::get_ref(fctx) })),
-            drop_worker <- new_scoped_work!("JobQueueDropWorker", Ok(DropWorker { inner: Pin::get_ref(inner) })),
+            })),
+            submit_worker <- new_scoped_work!("JobQueueSubmitWorker", Ok(SubmitWorker {
+                srcu: Pin::get_ref(srcu),
+                revoked,
+                inner: Pin::get_ref(inner),
+                fctx: Pin::get_ref(fctx)
+            })),
+            drop_worker <- new_scoped_work!("JobQueueDropWorker", Ok(DropWorker {
+                srcu: Pin::get_ref(srcu),
+                revoked,
+                inner: Pin::get_ref(inner)
+            })),
         })
     }
 
@@ -650,9 +667,7 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
     pub fn complete_jobs_up_to_seqno(&self, seqno: u64) {
         self.with_inner(|inner| {
             let needs_drop = core::mem::needs_drop::<T::JobDataType>();
-            // unwrap() can't fire because `self` is valid.
-            let jq = inner.try_access().unwrap();
-            let mut jq_locked = jq.lock();
+            let mut jq_locked = inner.lock();
             let mut jq = jq_locked.as_mut().project();
 
             if seqno < *jq.last_completed {
@@ -724,8 +739,7 @@ impl<T: JobQueueOps + Send + Sync> JobQueue<T> {
         Error: From<E>,
     {
         self.with_inner(|inner| {
-            let jq = inner.try_access().unwrap();
-            let mut jq = jq.lock();
+            let mut jq = inner.lock();
 
             // We don't drop the jobs and fences here while we hold the lock. Just
             // signal with the error. The dropping lists will then drop them locklessly.
@@ -748,6 +762,17 @@ impl<T: JobQueueOps + Send + Sync> PinnedDrop for JobQueue<T> {
     fn drop(self: Pin<&mut Self>) {
         // Revoke to prevent still existing DependencyWakers from kicking the
         // SubmitWorker again before we could deregister them.
-        let _ = self.with_inner(|inner| inner.revoke());
+        self.revoked.store(true, Relaxed);
+        self.srcu.synchronize();
+        self.with_inner(|inner| {
+            let mut inner = inner.lock();
+            let waiting_jobs = core::mem::take(&mut inner.waiting_jobs);
+            let running_jobs = core::mem::take(&mut inner.running_jobs);
+            let drop_list = core::mem::take(&mut inner.drop_list);
+            drop(inner);
+            drop(waiting_jobs);
+            drop(running_jobs);
+            drop(drop_list);
+        })
     }
 }
